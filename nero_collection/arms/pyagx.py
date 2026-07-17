@@ -1,0 +1,493 @@
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+
+from nero_collection.arms.base import ArmState, GripperState
+from nero_collection.arms.kinematics import pose6_to_matrix
+from nero_collection.config import ArmEndpointConfig
+from nero_collection.time_utils import now_us
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class PyAgxArmAdapter:
+    config: ArmEndpointConfig
+    name: str = field(init=False)
+    dof: int = 7
+    _robot: Any = field(init=False, default=None)
+    _gripper: Any = field(init=False, default=None)
+    _last_state: ArmState | None = None
+    _configured_role: str | None = None
+    _leader_mode_commanded: bool = False
+    _leader_feedback_timestamp: float | None = None
+
+    def __post_init__(self) -> None:
+        self.name = self.config.name
+
+    def connect(self) -> None:
+        try:
+            from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, create_agx_arm_config
+        except ImportError as exc:
+            try:
+                from PyAgxArm import AgxArmFactory, ArmModel, NeroFW, create_agx_arm_config  # type: ignore
+            except ImportError:
+                raise RuntimeError(
+                    "pyAgxArm is not installed. Install AgileX pyAgxArm or use teleop.backend=mock."
+                ) from exc
+
+        firmware = _enum_value(NeroFW, self.config.firmware)
+        kwargs = dict(self.config.config_kwargs)
+        if self.config.can_id is not None:
+            kwargs.setdefault("can_id", self.config.can_id)
+
+        sdk_config = create_agx_arm_config(
+            robot=ArmModel.NERO,
+            comm="can",
+            firmeware_version=firmware,
+            channel=self.config.channel,
+            interface=self.config.interface,
+            bitrate=self.config.bitrate,
+            **kwargs,
+        )
+        try:
+            self._robot = AgxArmFactory.create_arm(sdk_config)
+        except KeyError as exc:
+            available = [name for name in dir(NeroFW) if not name.startswith("_")]
+            raise RuntimeError(
+                f"Failed to create Nero arm {self.name} with firmware={self.config.firmware!r}. "
+                f"Current pyAgxArm NeroFW values: {available}. "
+                "Update configs/master_slave_can.yaml teleop.master_slave.*.firmware."
+            ) from exc
+        log.info(
+            "connecting Nero arm %s on %s id=%s interface=%s bitrate=%s",
+            self.name,
+            self.config.channel,
+            self.config.can_id,
+            self.config.interface,
+            self.config.bitrate,
+        )
+        self._robot.connect()
+
+    def disconnect(self) -> None:
+        if self._robot is not None:
+            _call_if_exists(self._robot, ("disconnect", "close", "shutdown"))
+
+    def enable(self) -> None:
+        robot = self._require_robot()
+        ret = False
+        for attempt in range(60):
+            ret = bool(robot.enable())
+            if ret:
+                log.info("enabled arm %s after %d attempt(s)", self.name, attempt + 1)
+                break
+            if attempt == 0:
+                log.warning("enable failed for %s; sending reset and clear_joint_error before retry", self.name)
+                _call_if_exists(robot, ("reset",))
+                clear_joint_error = getattr(robot, "clear_joint_error", None)
+                if callable(clear_joint_error):
+                    clear_joint_error(255)
+            elif attempt % 10 == 0:
+                log.warning("still waiting for %s enable; attempt=%d/60", self.name, attempt + 1)
+            time.sleep(0.05)
+        if not ret:
+            joint_enable = _safe_call(robot, "get_joints_enable_status_list")
+            arm_status = _unwrap_message(_safe_call(robot, "get_arm_status"))
+            raise RuntimeError(
+                f"Failed to enable arm {self.name}. Check E-stop, arm power, CAN wiring, "
+                f"{self.config.channel} state, and whether the controller needs a power cycle. "
+                f"joint_enable={joint_enable}, arm_status={arm_status}"
+            )
+        enabled = getattr(robot, "is_enabled", None)
+        if callable(enabled):
+            start = time.monotonic()
+            while not enabled() and time.monotonic() - start < 5.0:
+                time.sleep(0.05)
+            if not enabled():
+                raise RuntimeError(f"Timed out waiting for arm {self.name} to enable")
+
+    def disable(self) -> None:
+        robot = self._require_robot()
+        disable = getattr(robot, "disable", None)
+        if not callable(disable):
+            raise RuntimeError(f"Arm {self.name} does not expose disable()")
+        for attempt in range(20):
+            if bool(disable()):
+                log.info("disabled arm %s after %d attempt(s)", self.name, attempt + 1)
+                return
+            time.sleep(0.05)
+        log.warning("disable did not confirm for arm %s", self.name)
+
+    def set_leader_mode(self) -> None:
+        robot = self._require_robot()
+        self._leader_feedback_timestamp = _message_timestamp(
+            _call_method(robot, "get_leader_joint_angles")
+        )
+        ret = robot.set_leader_mode()
+        if ret is False:
+            raise RuntimeError(f"Failed to set {self.name} to leader mode")
+        self._configured_role = "leader"
+        self._leader_mode_commanded = True
+
+    def set_follower_mode(self) -> None:
+        ret = self._require_robot().set_follower_mode()
+        if ret is False:
+            raise RuntimeError(f"Failed to set {self.name} to follower mode")
+        self._configured_role = "follower"
+        self._leader_mode_commanded = False
+        self._leader_feedback_timestamp = None
+
+    def set_normal_mode(self) -> None:
+        robot = self._require_robot()
+        if _call_if_exists(robot, ("set_normal_mode", "set_servo_mode", "set_position_mode")) is False:
+            log.warning("arm %s does not expose a normal/position mode method", self.name)
+
+    def read_control_role(self, refresh: bool = False) -> str | None:
+        if self._configured_role is not None and not refresh:
+            return self._configured_role
+        commanded_role = self._configured_role
+        verify_leader_feedback = self._leader_mode_commanded and commanded_role == "leader"
+        robot = self._require_robot()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            status = _unwrap_message(_call_method(robot, "get_arm_status"))
+            ctrl_mode = _enum_int(getattr(status, "ctrl_mode", None))
+            if ctrl_mode == 0x06:
+                self._configured_role = "leader"
+                return self._configured_role
+            if ctrl_mode == 0x01 and not verify_leader_feedback:
+                self._configured_role = "follower"
+                return self._configured_role
+            leader_reader = getattr(robot, "get_leader_joint_angles", None)
+            if callable(leader_reader):
+                leader_feedback = leader_reader()
+                leader_q = _as_float_array(leader_feedback, self.dof)
+                feedback_timestamp = _message_timestamp(leader_feedback)
+                feedback_is_fresh = (
+                    feedback_timestamp is not None
+                    and (
+                        self._leader_feedback_timestamp is None
+                        or feedback_timestamp > self._leader_feedback_timestamp
+                    )
+                )
+                if np.isfinite(leader_q).all() and (feedback_is_fresh or not verify_leader_feedback):
+                    self._configured_role = "leader"
+                    if feedback_timestamp is not None:
+                        self._leader_feedback_timestamp = feedback_timestamp
+                    return self._configured_role
+            time.sleep(0.02)
+        return None
+
+    def read_state(self) -> ArmState:
+        robot = self._require_robot()
+        q = _as_float_array(robot.get_joint_angles(), self.dof)
+        motor_states = _read_motor_states(robot, self.dof)
+        ee_pose = _read_pose(robot)
+        timestamp_us = now_us()
+        dq = motor_states["velocity"]
+        ddq = _finite_difference_accel(dq, self._last_state, timestamp_us)
+        state = ArmState(
+            q=q,
+            dq=dq,
+            ddq=ddq,
+            ee_pose=ee_pose,
+            torque=motor_states["torque"],
+            current=motor_states["current"],
+            timestamp_us=timestamp_us,
+        )
+        self._last_state = state
+        return state
+
+    def read_leader_joint_positions(self) -> np.ndarray:
+        robot = self._require_robot()
+        reader = getattr(robot, "get_leader_joint_angles", None)
+        if callable(reader):
+            leader_q = _as_float_array(reader(), self.dof)
+            if np.isfinite(leader_q).all():
+                return leader_q
+        return self.read_state().q
+
+    def command_joint_positions(self, q: np.ndarray) -> None:
+        q = np.asarray(q, dtype=np.float64).reshape(-1)
+        if q.size != self.dof or not np.isfinite(q).all():
+            raise RuntimeError(f"Refusing to send invalid joint command to {self.name}: {q}")
+        ret = self._require_robot().move_js(q.tolist())
+        if ret is False:
+            raise RuntimeError(f"move_js failed on arm {self.name}")
+
+    def command_joint_impedance(
+        self,
+        q: np.ndarray,
+        v_des: np.ndarray,
+        kp: np.ndarray,
+        kd: np.ndarray,
+        t_ff: np.ndarray,
+    ) -> None:
+        vectors = {
+            "q": np.asarray(q, dtype=np.float64).reshape(-1),
+            "v_des": np.asarray(v_des, dtype=np.float64).reshape(-1),
+            "kp": np.asarray(kp, dtype=np.float64).reshape(-1),
+            "kd": np.asarray(kd, dtype=np.float64).reshape(-1),
+            "t_ff": np.asarray(t_ff, dtype=np.float64).reshape(-1),
+        }
+        for label, values in vectors.items():
+            if values.size != self.dof or not np.isfinite(values).all():
+                raise RuntimeError(f"Refusing to send invalid MIT {label} to {self.name}: {values}")
+
+        robot = self._require_robot()
+        move_mit = getattr(robot, "move_mit", None)
+        if not callable(move_mit):
+            raise RuntimeError(
+                "Installed pyAgxArm does not expose Nero move_mit(); update pyAgxArm "
+                "before using teleop.command.control_mode=mit"
+            )
+        for joint_index in range(1, self.dof + 1):
+            idx = joint_index - 1
+            ret = move_mit(
+                joint_index=joint_index,
+                p_des=float(vectors["q"][idx]),
+                v_des=float(vectors["v_des"][idx]),
+                kp=float(vectors["kp"][idx]),
+                kd=float(vectors["kd"][idx]),
+                t_ff=float(vectors["t_ff"][idx]),
+            )
+            if ret is False:
+                raise RuntimeError(f"move_mit failed on arm {self.name} joint {joint_index}")
+
+    def validate_joint_impedance_support(self) -> None:
+        if not callable(getattr(self._require_robot(), "move_mit", None)):
+            raise RuntimeError(
+                "Installed pyAgxArm does not expose Nero move_mit(); update pyAgxArm "
+                "before using teleop.command.control_mode=mit"
+            )
+
+    def move_joints(self, q: np.ndarray) -> None:
+        q = np.asarray(q, dtype=np.float64).reshape(-1)
+        if q.size != self.dof or not np.isfinite(q).all():
+            raise RuntimeError(f"Refusing to send invalid reset joint command to {self.name}: {q}")
+        ret = self._require_robot().move_j(q.tolist())
+        if ret is False:
+            raise RuntimeError(f"move_j failed on arm {self.name}")
+
+    def wait_motion_done(self, timeout_s: float, poll_interval_s: float = 0.1) -> bool:
+        robot = self._require_robot()
+        time.sleep(0.5)
+        start_t = time.monotonic()
+        while True:
+            status = _unwrap_message(_call_method(robot, "get_arm_status"))
+            if status is not None and getattr(status, "motion_status", None) == 0:
+                return True
+            if time.monotonic() - start_t > timeout_s:
+                log.warning("wait_motion_done timeout for %s after %.1fs", self.name, timeout_s)
+                return False
+            time.sleep(poll_interval_s)
+
+    def init_gripper(self, effector: str = "AGX_GRIPPER") -> None:
+        robot = self._require_robot()
+        options = getattr(robot, "OPTIONS", None)
+        effector_options = getattr(options, "EFFECTOR", None) if options is not None else None
+        effector_value = getattr(effector_options, effector, effector)
+        init_effector = getattr(robot, "init_effector", None)
+        if not callable(init_effector):
+            raise RuntimeError(f"Arm {self.name} does not expose init_effector()")
+        self._gripper = init_effector(effector_value)
+        log.info("initialized gripper %s on arm %s", effector, self.name)
+
+    def read_gripper_state(self) -> GripperState:
+        if self._gripper is None:
+            return GripperState(value=np.nan, force=np.nan, timestamp_us=now_us(), mode="unknown")
+        status_reader = getattr(self._gripper, "get_gripper_status", None)
+        status = _unwrap_message(status_reader()) if callable(status_reader) else None
+        mode = str(getattr(status, "mode", "unknown")).lower()
+        if mode not in {"width", "angle"}:
+            mode = "unknown"
+        return GripperState(
+            value=_field_float(status, ("value", "position", "pos")),
+            force=_field_float(status, ("force", "torque")),
+            timestamp_us=now_us(),
+            mode=mode,
+        )
+
+    def disable_gripper(self) -> None:
+        if self._gripper is None:
+            raise RuntimeError(f"Gripper on arm {self.name} has not been initialized")
+        disable_gripper = getattr(self._gripper, "disable_gripper", None)
+        if not callable(disable_gripper):
+            raise RuntimeError(f"Gripper on arm {self.name} does not expose disable_gripper()")
+        disable_gripper()
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            status_reader = getattr(self._gripper, "get_gripper_status", None)
+            status = _unwrap_message(status_reader()) if callable(status_reader) else None
+            foc_status = getattr(status, "foc_status", None)
+            if getattr(foc_status, "driver_enable_status", None) is False:
+                log.info("disabled leader-input gripper on arm %s", self.name)
+                return
+            time.sleep(0.02)
+        log.warning("gripper disable command sent but not confirmed on arm %s", self.name)
+
+    def command_gripper(self, value: float, force_n: float, mode: str = "width") -> None:
+        if self._gripper is None:
+            raise RuntimeError(f"Gripper on arm {self.name} has not been initialized")
+        value = float(value)
+        force_n = float(force_n)
+        if not np.isfinite(value) or not np.isfinite(force_n) or force_n < 0:
+            raise RuntimeError(
+                f"Refusing invalid gripper command on {self.name}: "
+                f"value={value}, force_n={force_n}, mode={mode}"
+            )
+        if mode == "width":
+            method_name = "move_gripper_m"
+        elif mode == "angle":
+            method_name = "move_gripper_deg"
+        else:
+            raise RuntimeError(f"Unsupported gripper mode on {self.name}: {mode!r}")
+        move_gripper = getattr(self._gripper, method_name, None)
+        if not callable(move_gripper):
+            raise RuntimeError(f"Gripper on arm {self.name} does not expose {method_name}()")
+        move_gripper(value=value, force=force_n)
+
+    def _require_robot(self) -> Any:
+        if self._robot is None:
+            raise RuntimeError(f"Arm {self.name} has not been connected")
+        return self._robot
+
+
+def _enum_value(enum_cls: Any, name: str) -> Any:
+    if hasattr(enum_cls, name):
+        return getattr(enum_cls, name)
+    upper = name.upper()
+    for attr in dir(enum_cls):
+        if attr.upper() == upper:
+            return getattr(enum_cls, attr)
+    return name
+
+
+def _enum_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(value.value)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+
+def _message_timestamp(value: Any) -> float | None:
+    timestamp = getattr(value, "timestamp", None)
+    try:
+        timestamp = float(timestamp)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(timestamp) or timestamp <= 0:
+        return None
+    return timestamp
+
+
+def _call_if_exists(obj: Any, names: tuple[str, ...]) -> Any:
+    for name in names:
+        method = getattr(obj, name, None)
+        if callable(method):
+            return method()
+    return None
+
+
+def _call_method(obj: Any, name: str) -> Any:
+    method = getattr(obj, name, None)
+    if callable(method):
+        return method()
+    return None
+
+
+def _safe_call(obj: Any, name: str) -> Any:
+    try:
+        return _call_method(obj, name)
+    except Exception as exc:  # pragma: no cover - diagnostic guard
+        return f"<{name} failed: {exc}>"
+
+
+def _as_float_array(value: Any, expected_size: int) -> np.ndarray:
+    value = _unwrap_message(value)
+    if value is None:
+        return np.full(expected_size, np.nan, dtype=np.float64)
+    if hasattr(value, "joint_angle"):
+        value = value.joint_angle
+    array = np.asarray(value, dtype=np.float64).reshape(-1)
+    if array.size == expected_size:
+        return array
+    if array.size == 0:
+        return np.full(expected_size, np.nan, dtype=np.float64)
+    if array.size > expected_size:
+        return array[:expected_size]
+    padded = np.full(expected_size, np.nan, dtype=np.float64)
+    padded[: array.size] = array
+    return padded
+
+
+def _read_motor_states(robot: Any, dof: int) -> dict[str, np.ndarray]:
+    velocity = np.full(dof, np.nan, dtype=np.float64)
+    torque = np.full(dof, np.nan, dtype=np.float64)
+    current = np.full(dof, np.nan, dtype=np.float64)
+    reader = getattr(robot, "get_motor_states", None) or getattr(robot, "get_motor_state", None)
+    if not callable(reader):
+        return {"velocity": velocity, "torque": torque, "current": current}
+    for idx in range(dof):
+        try:
+            state = reader(idx + 1)
+        except TypeError:
+            state = reader(idx)
+        state = _unwrap_message(state)
+        if state is None:
+            continue
+        velocity[idx] = _field_float(state, ("velocity", "vel", "speed"))
+        torque[idx] = _field_float(state, ("torque", "tau", "tau_ext"))
+        current[idx] = _field_float(state, ("current", "iq", "motor_current"))
+    return {"velocity": velocity, "torque": torque, "current": current}
+
+
+def _field_float(obj: Any, names: tuple[str, ...]) -> float:
+    obj = _unwrap_message(obj)
+    if obj is None:
+        return np.nan
+    for name in names:
+        if hasattr(obj, name):
+            try:
+                return float(getattr(obj, name))
+            except (TypeError, ValueError):
+                return np.nan
+    return np.nan
+
+
+def _read_pose(robot: Any) -> np.ndarray:
+    for method_name in ("get_tcp_pose", "get_flange_pose", "get_ee_pose", "get_end_pose"):
+        method = getattr(robot, method_name, None)
+        if callable(method):
+            try:
+                return pose6_to_matrix(_unwrap_message(method()))
+            except Exception as exc:  # pragma: no cover - hardware guard
+                log.debug("pose method %s failed: %s", method_name, exc)
+    return np.eye(4, dtype=np.float64)
+
+
+def _finite_difference_accel(dq: np.ndarray, last_state: ArmState | None, timestamp_us: int) -> np.ndarray:
+    if last_state is None:
+        return np.zeros_like(dq)
+    dt = max((timestamp_us - last_state.timestamp_us) / 1_000_000.0, 1e-6)
+    return (dq - last_state.dq) / dt
+
+
+def _unwrap_message(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "msg"):
+        return getattr(value, "msg")
+    if hasattr(value, "data"):
+        return getattr(value, "data")
+    return value

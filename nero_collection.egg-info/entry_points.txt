@@ -1,0 +1,2 @@
+[console_scripts]
+nero-collect = nero_collection.cli:main

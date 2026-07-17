@@ -1,0 +1,10 @@
+name: nero
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - numpy>=1.23,<3
+  - h5py>=3.11
+  - pyyaml>=6.0
+  - opencv

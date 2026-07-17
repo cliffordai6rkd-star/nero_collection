@@ -1,0 +1,116 @@
+teleop:
+  mode: master_slave  # 可选: master_slave(主从臂), meta_quest3_vr(Meta Quest 3 VR), keyboard_3d_mouse(键盘仿3D鼠标)
+  protocol: can
+  backend: pyagxarm
+  command:
+    sample_rate_hz: 200.0
+    idle_rate_hz: 30.0
+    input_ready_timeout_s: 3.0
+    role_switch_settle_s: 0.3
+    role_switch_timeout_s: 3.0
+    teleop_mapping: relative_offset  # absolute 或 relative_offset；relative_offset 可消掉主从初始误差
+    control_mode: position  # mit: 固件侧关节阻抗；position: 原 move_js 位置控制
+    mit:
+      # 顺序均为 joint1 ... joint7。先用低刚度测试，再逐步调参。
+      kp: [1.0, 1.0, 1.0, 5.0, 1.0, 5.0, 7.0]
+      kd: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 1.3]
+      v_des: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      t_ff: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # N.m
+    pre_teleop_align_enabled: true
+    pre_teleop_align_error_limit_rad: 0.03
+    joint_step_limit_rad: 0.3
+    idle_follow_enabled: false
+    reset_on_start: true
+    reset_after_episode: true
+    reset_interpolation_enabled: true
+    reset_interpolation_rate_hz: 30.0
+    reset_joint_speed_rad_s: 1.0
+    reset_min_duration_s: 0.2
+    reset_max_step_rad: 0.05
+    reset_wait_s: 0.8
+    reset_test_sample_time: 5
+    reset_error_limit_rad: 0.02
+  master_slave:
+    arm_pairs:
+      - name: main
+        leader:
+          name: master_arm
+          channel: can0
+          interface: socketcan
+          bitrate: 1000000
+          firmware: V112  # 实机 software_version=1.121，PyAgxArm 官方检测映射为 V112
+          # 复位阶段主臂会临时切到 follower_mode，并使用下面 follower.rest_q 共同复位。
+          # 按 r 或 t 后才切回 leader_mode。
+        follower:
+          name: slave_arm
+          channel: can1
+          interface: socketcan
+          bitrate: 1000000
+          firmware: V112  # 实机 software_version=1.121，PyAgxArm 官方检测映射为 V112
+          rest_q: [+0.00000, -0.14689, -0.01138, +1.80020, -0.02033, +0.02744, +1.50378]
+output:
+  directory: ../runs/nero_test
+  prefix: episode
+
+cameras:
+  - name: wrist
+    enabled: true
+    backend: orbbec_dabai
+    serial_number: ""
+    width: 640
+    height: 480
+    fps: 30.0
+    exposure: 40000
+    depth: false
+    crop: [0, null, 0, null]
+    output_size: [256, 192]
+  - name: overview
+    enabled: true
+    backend: orbbec_dabai
+    serial_number: ""
+    width: 640
+    height: 480
+    fps: 30.0
+    exposure: 40000
+    depth: false
+    crop: [0, null, 0, null]
+    output_size: [256, 192]
+
+gripper:
+  enabled: true
+  effector: AGX_GRIPPER
+  attach_to: both
+  teleop_enabled: true
+  scale: 1.0
+  offset_m: 0.0
+  offset_deg: 0.0
+  min_width_m: 0.0
+  max_width_m: 0.1
+  force_n: 1.0
+  command_rate_hz: 30.0
+  deadband_m: 0.0005
+  deadband_deg: 0.1
+  keepalive_s: 0.5
+
+robot_states:
+  q:
+    enabled: true
+    lowpass: false
+  velocity:
+    enabled: true
+    lowpass: false
+  acceleration:
+    enabled: true
+    lowpass: false
+    # ddq is derived from a causal 10 Hz low-pass of raw dq on the teleop timeline.
+    velocity_lowpass_cutoff_hz: 10.0
+  ee_pose:
+    enabled: true
+    lowpass: false
+  torque:
+    enabled: true
+    lowpass: false
+    lowpass_cutoff_hz: 10.0
+  current:
+    enabled: true
+    lowpass: false
