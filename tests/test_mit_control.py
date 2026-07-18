@@ -30,23 +30,52 @@ class LeaderFeedbackRobot(StatusRobot):
     def __init__(self) -> None:
         super().__init__(0x01)
         self.leader_timestamp = 1.0
+        self.mode_calls: list[str] = []
 
     def get_leader_joint_angles(self):
         return SimpleNamespace(msg=[0.0] * 7, timestamp=self.leader_timestamp)
 
+    def set_normal_mode(self) -> None:
+        self.mode_calls.append("normal")
+
     def set_leader_mode(self) -> None:
+        self.mode_calls.append("leader")
         self.leader_timestamp = 2.0
 
 
 class FakeGripper:
     def __init__(self) -> None:
         self.calls: list[tuple[str, float, float]] = []
+        self.disable_calls = 0
+        self.enabled = True
 
     def move_gripper_m(self, *, value: float, force: float) -> None:
         self.calls.append(("width", value, force))
 
     def move_gripper_deg(self, *, value: float, force: float) -> None:
         self.calls.append(("angle", value, force))
+
+    def disable_gripper(self) -> bool:
+        self.disable_calls += 1
+        self.enabled = False
+        return True
+
+    def get_gripper_status(self):
+        return SimpleNamespace(
+            timestamp=123.0,
+            msg=SimpleNamespace(
+                value=25.0,
+                force=0.2,
+                mode="angle",
+                foc_status=SimpleNamespace(driver_enable_status=self.enabled),
+            )
+        )
+
+    def get_gripper_ctrl_states(self):
+        return SimpleNamespace(
+            timestamp=124.0,
+            msg=SimpleNamespace(value=0.04, force=0.0, status_code=1),
+        )
 
 
 def test_master_slave_config_has_valid_control_parameters() -> None:
@@ -125,6 +154,7 @@ def test_pyagx_adapter_verifies_commanded_leader_from_fresh_joint_feedback() -> 
 
     adapter.set_leader_mode()
 
+    assert adapter._robot.mode_calls == ["leader", "leader", "leader"]
     assert adapter.read_control_role(refresh=True) == "leader"
 
 
@@ -146,3 +176,40 @@ def test_pyagx_adapter_commands_gripper_in_angle_mode() -> None:
     adapter.command_gripper(25.0, 2.0, mode="angle")
 
     assert gripper.calls == [("angle", 25.0, 2.0)]
+
+
+def test_pyagx_adapter_reads_angle_mode_and_disables_leader_gripper() -> None:
+    adapter = PyAgxArmAdapter(ArmEndpointConfig(name="arm"))
+    gripper = FakeGripper()
+    adapter._gripper = gripper
+
+    state = adapter.read_gripper_state()
+    adapter.disable_gripper()
+
+    assert state.value == pytest.approx(25.0)
+    assert state.mode == "angle"
+    assert state.timestamp_us == 123_000_000
+    assert gripper.disable_calls == 1
+
+
+def test_pyagx_adapter_reads_leader_gripper_control_frame() -> None:
+    adapter = PyAgxArmAdapter(ArmEndpointConfig(name="arm"))
+    adapter._gripper = FakeGripper()
+
+    state = adapter.read_leader_gripper_state()
+
+    assert state.value == pytest.approx(0.04)
+    assert state.mode == "width"
+    assert state.timestamp_us == 124_000_000
+
+
+def test_pyagx_adapter_rejects_gripper_control_frame_from_before_leader_mode() -> None:
+    adapter = PyAgxArmAdapter(ArmEndpointConfig(name="arm"))
+    adapter._gripper = FakeGripper()
+    adapter._leader_mode_commanded = True
+    adapter._leader_gripper_feedback_baseline = 124.0
+
+    state = adapter.read_leader_gripper_state()
+
+    assert np.isnan(state.value)
+    assert state.mode == "unknown"

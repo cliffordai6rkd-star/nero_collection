@@ -87,6 +87,9 @@ class ArmInterface(Protocol):
     def read_gripper_state(self) -> GripperState:
         ...
 
+    def read_leader_gripper_state(self) -> GripperState:
+        ...
+
     def disable_gripper(self) -> None:
         ...
 

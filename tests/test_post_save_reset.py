@@ -184,6 +184,9 @@ def _teleop_with_fakes(
     teleop._last_gripper_command_t = {}
     teleop._gripper_command_announced = set()
     teleop._gripper_feedback_warned = set()
+    teleop._leader_gripper_feedback_timestamp_us = {}
+    teleop._leader_gripper_feedback_change_t = {}
+    teleop._leader_gripper_stale_warned = set()
     return teleop
 
 
@@ -342,7 +345,7 @@ def test_gripper_teleop_maps_leader_width_to_follower() -> None:
     assert values["gripper_cmd"][1] == pytest.approx([0.06])
 
 
-def test_gripper_teleop_preserves_angle_mode_without_width_clipping() -> None:
+def test_gripper_teleop_ignores_non_width_input() -> None:
     leader = FakeLeader()
     leader.gripper_value = 25.0
     leader.gripper_mode = "angle"
@@ -355,17 +358,16 @@ def test_gripper_teleop_preserves_angle_mode_without_width_clipping() -> None:
             enabled=True,
             attach_to="both",
             teleop_enabled=True,
-            scale=1.0,
-            offset_deg=2.0,
         ),
     )
     values: dict[str, tuple[str, np.ndarray]] = {}
 
     teleop._update_gripper_teleop(values)
 
-    assert follower.gripper_commands == [(27.0, 1.0, "angle")]
-    assert values["gripper_mode_leader"][1] == pytest.approx([1])
-    assert values["gripper_mode_cmd"][1] == pytest.approx([1])
+    assert follower.gripper_commands == []
+    assert values["gripper_cmd"][1] == pytest.approx([np.nan], nan_ok=True)
+    assert "gripper_force" not in values
+    assert "gripper_mode_leader" not in values
 
 
 def test_wait_for_record_start_handles_t_then_r(monkeypatch: pytest.MonkeyPatch) -> None:

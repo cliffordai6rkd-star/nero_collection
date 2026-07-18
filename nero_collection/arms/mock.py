@@ -127,6 +127,9 @@ class MockArm:
             mode=self._gripper_mode,
         )
 
+    def read_leader_gripper_state(self) -> GripperState:
+        return self.read_gripper_state()
+
     def disable_gripper(self) -> None:
         self._ensure_connected()
 

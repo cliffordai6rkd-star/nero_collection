@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import re
+import subprocess
 import sys
 import time
 from dataclasses import replace
@@ -13,6 +15,7 @@ from nero_collection.cameras import CameraManager
 from nero_collection.config import CollectionConfig, load_config
 from nero_collection.h5_writer import EpisodeBuffer
 from nero_collection.keyboard import TerminalKeys
+from nero_collection.realtime_plot import RealtimeJointPlotter
 from nero_collection.teleop.master_slave import MasterSlaveTeleop
 
 log = logging.getLogger(__name__)
@@ -27,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     if args.backend:
         config = _with_backend(config, args.backend)
+    if config.teleop.backend == "pyagxarm" and not args.skip_can_setup:
+        _setup_can_interfaces(config)
     return run_collection(
         config=config,
         episode_limit=args.episode_limit,
@@ -43,6 +48,7 @@ def run_collection(
 ) -> int:
     teleop = MasterSlaveTeleop(config)
     cameras = CameraManager.from_config(config.cameras)
+    realtime_plot = RealtimeJointPlotter(config.realtime_plot, config.robot_states)
     output_dir = config.output.directory
     output_dir.mkdir(parents=True, exist_ok=True)
     episode_index = _next_episode_index(output_dir, config.output.prefix)
@@ -51,6 +57,7 @@ def run_collection(
     try:
         teleop.start()
         cameras.start()
+        realtime_plot.start()
         with TerminalKeys() as keys:
             if not keys.is_tty and dry_run_duration_s is None:
                 raise RuntimeError("stdin is not a TTY; use --dry-run-duration for non-interactive runs")
@@ -65,7 +72,15 @@ def run_collection(
                 )
                 log.info("recording episode %04d; press SPACE to stop", episode_index)
                 print("Recording. Press SPACE to stop.", flush=True)
-                _record_episode(buffer, teleop, cameras, keys, config, dry_run_duration_s)
+                _record_episode(
+                    buffer,
+                    teleop,
+                    cameras,
+                    keys,
+                    config,
+                    dry_run_duration_s,
+                    realtime_plot,
+                )
                 log.info("recorded %d teleop samples", buffer.sample_count)
 
                 save = _wait_for_save_choice(keys, auto_save)
@@ -87,6 +102,7 @@ def run_collection(
         print("\nCtrl-C received; shutting down.", flush=True)
         return 130
     finally:
+        realtime_plot.close()
         cameras.stop()
         teleop.shutdown()
     return 0
@@ -130,6 +146,7 @@ def _record_episode(
     keys: TerminalKeys,
     config: CollectionConfig,
     dry_run_duration_s: float | None,
+    realtime_plot: RealtimeJointPlotter,
 ) -> None:
     sample_period = 1.0 / max(config.teleop.command.sample_rate_hz, 1.0)
     start_t = time.monotonic()
@@ -144,7 +161,8 @@ def _record_episode(
             return
 
         timestamp_us, values = teleop.teleop_step()
-        buffer.append_teleop(timestamp_us, values)
+        processed_values = buffer.append_teleop(timestamp_us, values)
+        realtime_plot.append(timestamp_us, processed_values)
         for frame in cameras.poll():
             buffer.append_camera(frame.camera_name, frame.timestamp_us, frame.frame)
 
@@ -187,6 +205,53 @@ def _with_backend(config: CollectionConfig, backend: str) -> CollectionConfig:
     return replace(config, teleop=replace(config.teleop, backend=backend))
 
 
+def _setup_can_interfaces(config: CollectionConfig) -> None:
+    channel_bitrates: dict[str, int] = {}
+    for pair in config.teleop.master_slave:
+        for endpoint in (pair.leader, pair.follower):
+            if endpoint.interface != "socketcan":
+                continue
+            previous_bitrate = channel_bitrates.get(endpoint.channel)
+            if previous_bitrate is not None and previous_bitrate != endpoint.bitrate:
+                raise RuntimeError(
+                    f"Conflicting bitrates configured for {endpoint.channel}: "
+                    f"{previous_bitrate} and {endpoint.bitrate}"
+                )
+            channel_bitrates[endpoint.channel] = endpoint.bitrate
+    if not channel_bitrates:
+        log.info("no SocketCAN interfaces configured; skipping automatic CAN setup")
+        return
+
+    repository_root = Path(__file__).resolve().parents[1]
+    setup_script = repository_root / "scripts" / "setup_can.sh"
+    if not setup_script.is_file():
+        raise RuntimeError(f"CAN setup script not found: {setup_script}")
+
+    bitrate_groups: dict[int, list[str]] = {}
+    for channel, bitrate in channel_bitrates.items():
+        bitrate_groups.setdefault(bitrate, []).append(channel)
+    for bitrate, channels in bitrate_groups.items():
+        channels.sort()
+        log.info(
+            "configuring SocketCAN interfaces before collection channels=%s bitrate=%d",
+            ",".join(channels),
+            bitrate,
+        )
+        environment = os.environ.copy()
+        environment["CAN_BITRATE"] = str(bitrate)
+        try:
+            subprocess.run(
+                ["bash", str(setup_script), *channels],
+                cwd=repository_root,
+                env=environment,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"Automatic CAN setup failed for {channels} at bitrate {bitrate}"
+            ) from exc
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Nero master-slave teleoperation data collection.")
     parser.add_argument(
@@ -213,6 +278,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--auto-save",
         action="store_true",
         help="Save each stopped episode without asking y/n.",
+    )
+    parser.add_argument(
+        "--skip-can-setup",
+        action="store_true",
+        help="Skip the automatic scripts/setup_can.sh step for preconfigured interfaces.",
     )
     parser.add_argument(
         "--log-level",

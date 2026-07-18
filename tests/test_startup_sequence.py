@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from nero_collection.arms.base import ArmState
 from nero_collection.config import CollectionConfig, CommandConfig, GripperConfig, OutputConfig, TeleopConfig
@@ -199,3 +200,29 @@ def test_reset_role_check_prefers_role_commanded_by_this_process() -> None:
 
     assert arm.role == "follower"
     assert events == ["master:read_role:refresh=False", "master:set_follower"]
+
+
+def test_teleop_rejects_leader_without_fresh_hardware_feedback() -> None:
+    events: list[str] = []
+    leader = StaleRefreshArm("master", "follower", events)
+    follower = StartupArm("slave", "follower", events)
+    teleop = MasterSlaveTeleop.__new__(MasterSlaveTeleop)
+    teleop.config = CollectionConfig(
+        teleop=TeleopConfig(
+            command=CommandConfig(role_switch_settle_s=0.0, role_switch_timeout_s=0.01)
+        ),
+        output=OutputConfig(directory=Path(".")),
+    )
+    pair = ArmPairRuntime(
+        name="main",
+        leader=leader,
+        follower=follower,
+        rest_q_leader=np.zeros(7),
+        rest_q_follower=np.zeros(7),
+    )
+
+    with pytest.raises(RuntimeError, match="Arm role switch not confirmed"):
+        teleop._prepare_pair_for_teleop(pair)
+
+    assert leader.role == "leader"
+    assert "master:read_role:refresh=True" in events

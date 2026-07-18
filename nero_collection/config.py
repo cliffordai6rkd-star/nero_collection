@@ -16,6 +16,7 @@ class StateParamConfig:
     enabled: bool = True
     lowpass: bool = False
     lowpass_cutoff_hz: float = 12.0
+    median_window: int = 1
     velocity_lowpass_cutoff_hz: float | None = None
 
 
@@ -26,10 +27,49 @@ class OutputConfig:
 
 
 @dataclass(frozen=True)
+class ContactWrenchConfig:
+    urdf_path: Path = Path("urdf/nero/nero_with_gripper.urdf")
+    frame_name: str = "gripper_base"
+    delay_s: float = 0.5
+    damping: float = 0.02
+    reference_frame: str = "local"
+    locked_joint_names: tuple[str, ...] = (
+        "gripper",
+        "gripper_joint1",
+        "gripper_joint2",
+    )
+    gravity_m_s2: tuple[float, float, float] = (0.0, 0.0, -9.81)
+
+
+@dataclass(frozen=True)
+class InverseDynamicsConfig:
+    urdf_path: Path = Path("urdf/nero/nero_with_gripper.urdf")
+    delay_s: float = 0.5
+    locked_joint_names: tuple[str, ...] = (
+        "gripper",
+        "gripper_joint1",
+        "gripper_joint2",
+    )
+    gravity_m_s2: tuple[float, float, float] = (0.0, 0.0, -9.81)
+
+
+@dataclass(frozen=True)
+class RealtimePlotConfig:
+    enabled: bool = False
+    window_s: float = 10.0
+    update_rate_hz: float = 20.0
+    inverse_dynamics: InverseDynamicsConfig = field(default_factory=InverseDynamicsConfig)
+
+
+@dataclass(frozen=True)
 class CameraConfig:
     name: str
     enabled: bool = True
     backend: str = "orbbec_dabai"
+    device: str | int | None = None
+    pixel_format: str = "MJPG"
+    buffer_size: int = 1
+    startup_timeout_s: float = 3.0
     serial_number: str | None = None
     width: int = 640
     height: int = 480
@@ -112,13 +152,11 @@ class GripperConfig:
     teleop_enabled: bool = False
     scale: float = 1.0
     offset_m: float = 0.0
-    offset_deg: float = 0.0
     min_width_m: float = 0.0
     max_width_m: float = 0.07
     force_n: float = 1.0
     command_rate_hz: float = 30.0
     deadband_m: float = 0.0005
-    deadband_deg: float = 0.1
     keepalive_s: float = 0.5
 
 
@@ -128,6 +166,7 @@ class CollectionConfig:
     output: OutputConfig
     cameras: tuple[CameraConfig, ...] = ()
     gripper: GripperConfig = field(default_factory=GripperConfig)
+    realtime_plot: RealtimePlotConfig = field(default_factory=RealtimePlotConfig)
     robot_states: dict[str, StateParamConfig] = field(default_factory=dict)
     raw_yaml: str = ""
 
@@ -162,12 +201,14 @@ def load_config(path: str | Path) -> CollectionConfig:
     output = _parse_output(data.get("output", {}), config_path.parent)
     cameras = tuple(_parse_camera(item) for item in data.get("cameras", []) if item.get("enabled", True))
     gripper = _parse_gripper(data.get("gripper", {}))
+    realtime_plot = _parse_realtime_plot(data.get("realtime_plot", {}), config_path.parent)
     robot_states = _parse_state_params(data.get("robot_states", {}))
     return CollectionConfig(
         teleop=teleop,
         output=output,
         cameras=cameras,
         gripper=gripper,
+        realtime_plot=realtime_plot,
         robot_states=robot_states,
         raw_yaml=raw_yaml,
     )
@@ -280,6 +321,10 @@ def _parse_camera(data: dict[str, Any]) -> CameraConfig:
         "name",
         "enabled",
         "backend",
+        "device",
+        "pixel_format",
+        "buffer_size",
+        "startup_timeout_s",
         "serial_number",
         "width",
         "height",
@@ -291,18 +336,51 @@ def _parse_camera(data: dict[str, Any]) -> CameraConfig:
     }
     crop = tuple(data.get("crop", (0, None, 0, None)))
     output_size = data.get("output_size")
+    device = data.get("device")
+    if device is not None and not isinstance(device, (str, int)):
+        raise ValueError("camera.device must be a device path or integer index")
+    backend = str(data.get("backend", "orbbec_dabai"))
+    normalized_backend = backend.lower().replace("-", "_")
+    if normalized_backend in {"v4l2", "opencv_v4l2", "opencv"} and device is None:
+        raise ValueError("V4L2 camera configuration must define device")
+    pixel_format = str(data.get("pixel_format", "MJPG")).upper()
+    if len(pixel_format) != 4 or not pixel_format.isascii():
+        raise ValueError("camera.pixel_format must be a four-character V4L2 code")
+    width = int(data.get("width", 640))
+    height = int(data.get("height", 480))
+    fps = float(data.get("fps", 30.0))
+    buffer_size = int(data.get("buffer_size", 1))
+    startup_timeout_s = float(data.get("startup_timeout_s", 3.0))
+    if width <= 0 or height <= 0:
+        raise ValueError("camera width and height must be positive")
+    if not isfinite(fps) or fps <= 0:
+        raise ValueError("camera fps must be positive and finite")
+    if buffer_size <= 0:
+        raise ValueError("camera.buffer_size must be positive")
+    if not isfinite(startup_timeout_s) or startup_timeout_s <= 0:
+        raise ValueError("camera.startup_timeout_s must be positive and finite")
+    normalized_crop = _normalize_crop(crop)
+    normalized_output_size = tuple(int(value) for value in output_size) if output_size else None
+    if normalized_output_size is not None and (
+        len(normalized_output_size) != 2 or any(value <= 0 for value in normalized_output_size)
+    ):
+        raise ValueError("camera.output_size must contain positive [width, height]")
     return CameraConfig(
         name=str(name),
         enabled=bool(data.get("enabled", True)),
-        backend=str(data.get("backend", "orbbec_dabai")),
+        backend=backend,
+        device=device,
+        pixel_format=pixel_format,
+        buffer_size=buffer_size,
+        startup_timeout_s=startup_timeout_s,
         serial_number=data.get("serial_number"),
-        width=int(data.get("width", 640)),
-        height=int(data.get("height", 480)),
-        fps=float(data.get("fps", 30.0)),
+        width=width,
+        height=height,
+        fps=fps,
         exposure=data.get("exposure"),
         depth=bool(data.get("depth", False)),
-        crop=_normalize_crop(crop),
-        output_size=tuple(output_size) if output_size else None,
+        crop=normalized_crop,
+        output_size=normalized_output_size,
         extra={key: value for key, value in data.items() if key not in known},
     )
 
@@ -317,24 +395,20 @@ def _parse_gripper(data: dict[str, Any]) -> GripperConfig:
         raise ValueError("gripper.attach_to must be one of: leader, follower, both")
     scale = float(data.get("scale", 1.0))
     offset_m = float(data.get("offset_m", 0.0))
-    offset_deg = float(data.get("offset_deg", 0.0))
     min_width_m = float(data.get("min_width_m", 0.0))
     max_width_m = float(data.get("max_width_m", 0.07))
     force_n = float(data.get("force_n", 1.0))
     command_rate_hz = float(data.get("command_rate_hz", 30.0))
     deadband_m = float(data.get("deadband_m", 0.0005))
-    deadband_deg = float(data.get("deadband_deg", 0.1))
     keepalive_s = float(data.get("keepalive_s", 0.5))
     numeric_values = (
         scale,
         offset_m,
-        offset_deg,
         min_width_m,
         max_width_m,
         force_n,
         command_rate_hz,
         deadband_m,
-        deadband_deg,
         keepalive_s,
     )
     if not all(isfinite(value) for value in numeric_values):
@@ -349,8 +423,6 @@ def _parse_gripper(data: dict[str, Any]) -> GripperConfig:
         raise ValueError("gripper.command_rate_hz must be positive")
     if deadband_m < 0:
         raise ValueError("gripper.deadband_m must be non-negative")
-    if deadband_deg < 0:
-        raise ValueError("gripper.deadband_deg must be non-negative")
     if keepalive_s <= 0:
         raise ValueError("gripper.keepalive_s must be positive")
     return GripperConfig(
@@ -360,14 +432,66 @@ def _parse_gripper(data: dict[str, Any]) -> GripperConfig:
         teleop_enabled=bool(data.get("teleop_enabled", False)),
         scale=scale,
         offset_m=offset_m,
-        offset_deg=offset_deg,
         min_width_m=min_width_m,
         max_width_m=max_width_m,
         force_n=force_n,
         command_rate_hz=command_rate_hz,
         deadband_m=deadband_m,
-        deadband_deg=deadband_deg,
         keepalive_s=keepalive_s,
+    )
+
+
+def _parse_realtime_plot(
+    data: dict[str, Any],
+    config_dir: Path | None = None,
+) -> RealtimePlotConfig:
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError("realtime_plot must be a mapping")
+    window_s = float(data.get("window_s", 10.0))
+    update_rate_hz = float(data.get("update_rate_hz", 20.0))
+    if not isfinite(window_s) or window_s <= 0:
+        raise ValueError("realtime_plot.window_s must be positive and finite")
+    if not isfinite(update_rate_hz) or update_rate_hz <= 0:
+        raise ValueError("realtime_plot.update_rate_hz must be positive and finite")
+    if "inverse_dynamics" in data and "contact_wrench" in data:
+        raise ValueError("realtime_plot must not define both inverse_dynamics and contact_wrench")
+    inverse_data = data.get("inverse_dynamics", data.get("contact_wrench", {}))
+    if inverse_data is None:
+        inverse_data = {}
+    if not isinstance(inverse_data, dict):
+        raise ValueError("realtime_plot.inverse_dynamics must be a mapping")
+    base_dir = Path.cwd() if config_dir is None else Path(config_dir)
+    urdf_path = Path(
+        inverse_data.get("urdf_path", "../urdf/nero/nero_with_gripper.urdf")
+    ).expanduser()
+    if not urdf_path.is_absolute():
+        urdf_path = (base_dir / urdf_path).resolve()
+    delay_s = float(inverse_data.get("delay_s", 0.5))
+    if not isfinite(delay_s) or delay_s < 0:
+        raise ValueError("realtime_plot.inverse_dynamics.delay_s must be non-negative and finite")
+    locked_joint_names = tuple(
+        str(name) for name in inverse_data.get(
+            "locked_joint_names",
+            ("gripper", "gripper_joint1", "gripper_joint2"),
+        )
+    )
+    if not all(locked_joint_names):
+        raise ValueError("realtime_plot.inverse_dynamics.locked_joint_names must contain valid names")
+    gravity = tuple(float(value) for value in inverse_data.get("gravity_m_s2", (0.0, 0.0, -9.81)))
+    if len(gravity) != 3 or not all(isfinite(value) for value in gravity):
+        raise ValueError("realtime_plot.inverse_dynamics.gravity_m_s2 must contain three finite values")
+    return RealtimePlotConfig(
+        enabled=bool(data.get("enabled", False)),
+        window_s=window_s,
+        update_rate_hz=update_rate_hz,
+        inverse_dynamics=InverseDynamicsConfig(
+            urdf_path=urdf_path,
+            delay_s=delay_s,
+            locked_joint_names=locked_joint_names,
+            gravity_m_s2=gravity,
+        ),
     )
 
 
@@ -429,13 +553,22 @@ def _parse_state_param(value: Any) -> StateParamConfig:
         return StateParamConfig(enabled=True, lowpass=False)
     if not isinstance(value, dict):
         raise ValueError("Each robot_states item must be bool or mapping")
+    lowpass_cutoff_hz = float(value.get("lowpass_cutoff_hz", 12.0))
+    if not isfinite(lowpass_cutoff_hz) or lowpass_cutoff_hz <= 0:
+        raise ValueError("lowpass_cutoff_hz must be positive and finite")
+    median_window = int(value.get("median_window", 1))
+    if median_window < 1 or median_window % 2 == 0:
+        raise ValueError("median_window must be a positive odd integer")
     velocity_lowpass_cutoff_hz = _optional_float(value.get("velocity_lowpass_cutoff_hz"))
-    if velocity_lowpass_cutoff_hz is not None and velocity_lowpass_cutoff_hz <= 0:
-        raise ValueError("velocity_lowpass_cutoff_hz must be positive when provided")
+    if velocity_lowpass_cutoff_hz is not None and (
+        not isfinite(velocity_lowpass_cutoff_hz) or velocity_lowpass_cutoff_hz <= 0
+    ):
+        raise ValueError("velocity_lowpass_cutoff_hz must be positive and finite when provided")
     return StateParamConfig(
         enabled=bool(value.get("enabled", True)),
         lowpass=bool(value.get("lowpass", False)),
-        lowpass_cutoff_hz=float(value.get("lowpass_cutoff_hz", 12.0)),
+        lowpass_cutoff_hz=lowpass_cutoff_hz,
+        median_window=median_window,
         velocity_lowpass_cutoff_hz=velocity_lowpass_cutoff_hz,
     )
 
@@ -443,7 +576,15 @@ def _parse_state_param(value: Any) -> StateParamConfig:
 def _normalize_crop(crop: tuple[Any, ...]) -> tuple[int | None, int | None, int | None, int | None]:
     if len(crop) != 4:
         raise ValueError("camera.crop must contain four values: [y0, y1, x0, x1]")
-    return tuple(None if value is None else int(value) for value in crop)  # type: ignore[return-value]
+    normalized = tuple(None if value is None else int(value) for value in crop)
+    if any(value is not None and value < 0 for value in normalized):
+        raise ValueError("camera.crop values must be non-negative or null")
+    y0, y1, x0, x1 = normalized
+    if y0 is not None and y1 is not None and y1 <= y0:
+        raise ValueError("camera.crop y1 must be greater than y0")
+    if x0 is not None and x1 is not None and x1 <= x0:
+        raise ValueError("camera.crop x1 must be greater than x0")
+    return normalized  # type: ignore[return-value]
 
 
 def _optional_float(value: Any) -> float | None:

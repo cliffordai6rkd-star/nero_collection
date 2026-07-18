@@ -49,29 +49,46 @@ teleop:
           firmware: V112  # 实机 software_version=1.121，PyAgxArm 官方检测映射为 V112
           rest_q: [+0.00000, -0.14689, -0.01138, +1.80020, -0.02033, +0.02744, +1.50378]
 output:
-  directory: ../runs/nero_test
+  directory: ../runs/nero_test_1
   prefix: episode
 
+# 开启后显示 0.5 秒前的从臂 q、tau 和七轴 tau_ext=tau_id-tau_follower。
+realtime_plot:
+  enabled: true
+  window_s: 10.0
+  update_rate_hz: 20.0
+  inverse_dynamics:
+    urdf_path: ../urdf/nero/nero_with_gripper.urdf
+    delay_s: 0.5
+    locked_joint_names: [gripper, gripper_joint1, gripper_joint2]
+    gravity_m_s2: [0.0, 0.0, -9.81]
+
 cameras:
-  - name: wrist
+  - name: side
     enabled: true
-    backend: orbbec_dabai
-    serial_number: ""
+    backend: v4l2
+    device: /dev/video2
+    pixel_format: MJPG
+    buffer_size: 1
+    startup_timeout_s: 3.0
     width: 640
     height: 480
     fps: 30.0
-    exposure: 40000
+    exposure: null
     depth: false
     crop: [0, null, 0, null]
     output_size: [256, 192]
-  - name: overview
+  - name: wrist
     enabled: true
-    backend: orbbec_dabai
-    serial_number: ""
+    backend: v4l2
+    device: /dev/video4
+    pixel_format: MJPG
+    buffer_size: 1
+    startup_timeout_s: 5.0
     width: 640
     height: 480
     fps: 30.0
-    exposure: 40000
+    exposure: null
     depth: false
     crop: [0, null, 0, null]
     output_size: [256, 192]
@@ -83,13 +100,11 @@ gripper:
   teleop_enabled: true
   scale: 1.0
   offset_m: 0.0
-  offset_deg: 0.0
   min_width_m: 0.0
   max_width_m: 0.1
   force_n: 1.0
   command_rate_hz: 30.0
   deadband_m: 0.0005
-  deadband_deg: 0.1
   keepalive_s: 0.5
 
 robot_states:
@@ -101,7 +116,7 @@ robot_states:
     lowpass: false
   acceleration:
     enabled: true
-    lowpass: false
+    lowpass: true
     # ddq is derived from a causal 10 Hz low-pass of raw dq on the teleop timeline.
     velocity_lowpass_cutoff_hz: 10.0
   ee_pose:
@@ -109,8 +124,11 @@ robot_states:
     lowpass: false
   torque:
     enabled: true
-    lowpass: false
+    lowpass: true
     lowpass_cutoff_hz: 10.0
+    median_window: 3
   current:
     enabled: true
-    lowpass: false
+    lowpass: true
+    lowpass_cutoff_hz: 10.0
+    median_window: 3

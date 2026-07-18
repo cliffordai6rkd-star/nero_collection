@@ -48,6 +48,9 @@ class MasterSlaveTeleop:
         self._last_gripper_command_t: dict[str, float] = {}
         self._gripper_command_announced: set[str] = set()
         self._gripper_feedback_warned: set[str] = set()
+        self._leader_gripper_feedback_timestamp_us: dict[str, int] = {}
+        self._leader_gripper_feedback_change_t: dict[str, float] = {}
+        self._leader_gripper_stale_warned: set[str] = set()
 
     def start(self) -> None:
         log.info("starting Nero master-slave arms over CAN")
@@ -200,7 +203,7 @@ class MasterSlaveTeleop:
         else:  # pragma: no cover - internal contract
             raise ValueError(f"Unsupported arm role {expected_role!r}")
         log.info(
-            "arm role switched pair=%s arm=%s role=%s",
+            "arm role switch command sent pair=%s arm=%s required_role=%s; awaiting hardware feedback",
             pair_name,
             arm.name,
             expected_role,
@@ -232,32 +235,39 @@ class MasterSlaveTeleop:
         )
 
     def _prepare_pair_for_teleop(self, pair: ArmPairRuntime) -> None:
-        expected_roles = (
-            ("follower", pair.follower, "follower"),
-            ("leader", pair.leader, "leader"),
-        )
         switched = False
-        for _endpoint, arm, expected_role in expected_roles:
-            switched |= self._ensure_arm_role(pair.name, arm, expected_role)
+        switched |= self._ensure_arm_role(pair.name, pair.follower, "follower")
+        switched |= self._ensure_arm_role(pair.name, pair.leader, "leader")
         self._settle_after_role_switch(switched)
 
-        for endpoint, arm, expected_role in expected_roles:
-            try:
-                self._wait_for_arm_role(pair.name, arm, expected_role)
-            except RuntimeError:
-                log.warning(
-                    "retrying arm mode before teleop pair=%s endpoint=%s arm=%s role=%s",
-                    pair.name,
-                    endpoint,
-                    arm.name,
-                    expected_role,
-                )
-                if expected_role == "leader":
-                    arm.set_leader_mode()
-                else:
-                    arm.set_follower_mode()
-                self._settle_after_role_switch(True)
-                self._wait_for_arm_role(pair.name, arm, expected_role)
+        try:
+            self._wait_for_arm_role(pair.name, pair.follower, "follower")
+        except RuntimeError:
+            log.warning(
+                "retrying follower mode before teleop pair=%s arm=%s",
+                pair.name,
+                pair.follower.name,
+            )
+            pair.follower.set_follower_mode()
+            self._settle_after_role_switch(True)
+            self._wait_for_arm_role(pair.name, pair.follower, "follower")
+
+        try:
+            self._wait_for_arm_role(pair.name, pair.leader, "leader")
+        except RuntimeError:
+            log.warning(
+                "retrying leader mode before teleop pair=%s arm=%s",
+                pair.name,
+                pair.leader.name,
+            )
+            pair.leader.set_leader_mode()
+            self._settle_after_role_switch(True)
+            self._wait_for_arm_role(pair.name, pair.leader, "leader")
+        log.info(
+            "leader mode verified from fresh leader feedback pair=%s arm=%s",
+            pair.name,
+            pair.leader.name,
+        )
 
     def _prepare_pair_for_reset(self, pair: ArmPairRuntime) -> None:
         switched = False
@@ -332,88 +342,87 @@ class MasterSlaveTeleop:
         if not gripper.enabled:
             return
         leader_values: list[np.ndarray] = []
-        leader_forces: list[np.ndarray] = []
-        leader_modes: list[np.ndarray] = []
         follower_values: list[np.ndarray] = []
-        follower_forces: list[np.ndarray] = []
-        follower_modes: list[np.ndarray] = []
         command_values: list[np.ndarray] = []
-        command_modes: list[np.ndarray] = []
         now = time.monotonic()
         command_period = 1.0 / gripper.command_rate_hz
         for pair in self.pairs:
             read_leader = gripper.teleop_enabled or gripper.attach_to in {"leader", "both"}
             read_follower = gripper.teleop_enabled or gripper.attach_to in {"follower", "both"}
-            leader_state = pair.leader.read_gripper_state() if read_leader else None
+            leader_reader = getattr(
+                pair.leader,
+                "read_leader_gripper_state",
+                pair.leader.read_gripper_state,
+            )
+            leader_state = leader_reader() if read_leader else None
             follower_state = pair.follower.read_gripper_state() if read_follower else None
             if leader_state is not None:
+                previous_timestamp = self._leader_gripper_feedback_timestamp_us.get(pair.name)
+                if previous_timestamp != leader_state.timestamp_us:
+                    self._leader_gripper_feedback_timestamp_us[pair.name] = leader_state.timestamp_us
+                    self._leader_gripper_feedback_change_t[pair.name] = now
+                    self._leader_gripper_stale_warned.discard(pair.name)
+                else:
+                    last_change_t = self._leader_gripper_feedback_change_t.get(pair.name, now)
+                    if now - last_change_t >= max(1.0, 2.0 * gripper.keepalive_s):
+                        if pair.name not in self._leader_gripper_stale_warned:
+                            log.warning(
+                                "leader gripper feedback is stale pair=%s value=%.6f mode=%s; "
+                                "no updated CAN gripper frame received",
+                                pair.name,
+                                leader_state.value,
+                                leader_state.mode,
+                            )
+                            self._leader_gripper_stale_warned.add(pair.name)
+            if leader_state is not None:
                 leader_values.append(np.asarray([leader_state.value], dtype=np.float64))
-                leader_forces.append(np.asarray([leader_state.force], dtype=np.float64))
-                leader_modes.append(np.asarray([_gripper_mode_code(leader_state.mode)], dtype=np.int8))
             if follower_state is not None:
                 follower_values.append(np.asarray([follower_state.value], dtype=np.float64))
-                follower_forces.append(np.asarray([follower_state.force], dtype=np.float64))
-                follower_modes.append(np.asarray([_gripper_mode_code(follower_state.mode)], dtype=np.int8))
 
             command_value = np.nan
-            command_mode = "unknown"
             valid_leader_state = (
                 leader_state is not None
                 and np.isfinite(leader_state.value)
-                and leader_state.mode in {"width", "angle"}
+                and leader_state.mode == "width"
             )
             if gripper.teleop_enabled and valid_leader_state:
-                command_mode = leader_state.mode
-                if command_mode == "width":
-                    command_value = float(
-                        np.clip(
-                            gripper.scale * leader_state.value + gripper.offset_m,
-                            gripper.min_width_m,
-                            gripper.max_width_m,
-                        )
+                command_value = float(
+                    np.clip(
+                        gripper.scale * leader_state.value + gripper.offset_m,
+                        gripper.min_width_m,
+                        gripper.max_width_m,
                     )
-                    deadband = gripper.deadband_m
-                    unit = "m"
-                else:
-                    command_value = float(gripper.scale * leader_state.value + gripper.offset_deg)
-                    deadband = gripper.deadband_deg
-                    unit = "deg"
+                )
                 last_value = self._last_gripper_command.get(pair.name)
                 last_mode = self._last_gripper_command_mode.get(pair.name)
                 last_t = self._last_gripper_command_t.get(pair.name, float("-inf"))
                 changed = (
                     last_value is None
-                    or last_mode != command_mode
-                    or abs(command_value - last_value) >= deadband
+                    or last_mode != "width"
+                    or abs(command_value - last_value) >= gripper.deadband_m
                 )
                 due = now - last_t >= command_period
                 keepalive_due = now - last_t >= gripper.keepalive_s
                 if due and (changed or keepalive_due):
-                    pair.follower.command_gripper(command_value, gripper.force_n, mode=command_mode)
+                    pair.follower.command_gripper(command_value, gripper.force_n, mode="width")
                     if pair.name not in self._gripper_command_announced:
                         log.info(
-                            "gripper teleop active pair=%s mode=%s leader=%.6f%s command=%.6f%s force=%.3fN",
+                            "gripper teleop active pair=%s leader=%.6fm command=%.6fm force=%.3fN",
                             pair.name,
-                            command_mode,
                             leader_state.value,
-                            unit,
                             command_value,
-                            unit,
                             gripper.force_n,
                         )
                         self._gripper_command_announced.add(pair.name)
                     else:
                         log.debug(
-                            "gripper command pair=%s mode=%s leader=%.6f%s command=%.6f%s",
+                            "gripper command pair=%s leader=%.6fm command=%.6fm",
                             pair.name,
-                            command_mode,
                             leader_state.value,
-                            unit,
                             command_value,
-                            unit,
                         )
                     self._last_gripper_command[pair.name] = command_value
-                    self._last_gripper_command_mode[pair.name] = command_mode
+                    self._last_gripper_command_mode[pair.name] = "width"
                     self._last_gripper_command_t[pair.name] = now
             elif gripper.teleop_enabled and pair.name not in self._gripper_feedback_warned:
                 mode = leader_state.mode if leader_state is not None else "unavailable"
@@ -424,24 +433,16 @@ class MasterSlaveTeleop:
                 )
                 self._gripper_feedback_warned.add(pair.name)
             command_values.append(np.asarray([command_value], dtype=np.float64))
-            command_modes.append(np.asarray([_gripper_mode_code(command_mode)], dtype=np.int8))
 
         if follower_values:
             follower_value = _concat(follower_values)
-            follower_force = _concat(follower_forces)
             values["gripper_state"] = ("gripper", follower_value)
             values["gripper_value"] = ("gripper", follower_value)
-            values["gripper_force"] = ("gripper", follower_force)
             values["gripper_follower"] = ("gripper", follower_value)
-            values["gripper_force_follower"] = ("gripper", follower_force)
-            values["gripper_mode_follower"] = ("gripper_mode", _concat(follower_modes))
         if leader_values:
             values["gripper_leader"] = ("gripper", _concat(leader_values))
-            values["gripper_force_leader"] = ("gripper", _concat(leader_forces))
-            values["gripper_mode_leader"] = ("gripper_mode", _concat(leader_modes))
         if command_values:
             values["gripper_cmd"] = ("gripper", _concat(command_values))
-            values["gripper_mode_cmd"] = ("gripper_mode", _concat(command_modes))
 
     def reset_to_rest(self) -> None:
         command = self.config.teleop.command
@@ -693,7 +694,6 @@ class MasterSlaveTeleop:
             values["tau_leader"] = ("torque", _concat([state.torque for state in leader_states]))
             follower_tau = _concat([state.torque for state in follower_states])
             values["tau_follower"] = ("torque", follower_tau)
-            values["tau_ext"] = ("torque", follower_tau)
 
         if states.get("current") and states["current"].enabled:
             values["current_leader"] = ("current", _concat([state.current for state in leader_states]))
@@ -712,14 +712,6 @@ def _concat(values: list[np.ndarray]) -> np.ndarray:
     if not values:
         return np.empty((0,), dtype=np.float64)
     return np.concatenate([np.asarray(value, dtype=np.float64).reshape(-1) for value in values], axis=0)
-
-
-def _gripper_mode_code(mode: str) -> int:
-    if mode == "width":
-        return 0
-    if mode == "angle":
-        return 1
-    return -1
 
 
 def _pose_stack(poses: list[np.ndarray]) -> np.ndarray:

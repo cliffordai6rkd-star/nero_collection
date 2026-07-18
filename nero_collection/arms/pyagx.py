@@ -14,6 +14,9 @@ from nero_collection.time_utils import now_us
 
 log = logging.getLogger(__name__)
 
+_LEADER_MODE_SEND_ATTEMPTS = 3
+_LEADER_MODE_SEND_INTERVAL_S = 0.15
+
 
 @dataclass
 class PyAgxArmAdapter:
@@ -26,6 +29,7 @@ class PyAgxArmAdapter:
     _configured_role: str | None = None
     _leader_mode_commanded: bool = False
     _leader_feedback_timestamp: float | None = None
+    _leader_gripper_feedback_baseline: float | None = None
 
     def __post_init__(self) -> None:
         self.name = self.config.name
@@ -128,9 +132,38 @@ class PyAgxArmAdapter:
         self._leader_feedback_timestamp = _message_timestamp(
             _call_method(robot, "get_leader_joint_angles")
         )
-        ret = robot.set_leader_mode()
-        if ret is False:
-            raise RuntimeError(f"Failed to set {self.name} to leader mode")
+        if self._gripper is not None:
+            control_reader = getattr(self._gripper, "get_gripper_ctrl_states", None)
+            self._leader_gripper_feedback_baseline = _message_timestamp(
+                control_reader() if callable(control_reader) else None
+            )
+        successful_sends = 0
+        last_error: Exception | None = None
+        for attempt in range(1, _LEADER_MODE_SEND_ATTEMPTS + 1):
+            try:
+                ret = robot.set_leader_mode()
+                if ret is False:
+                    raise RuntimeError("SDK returned False")
+                successful_sends += 1
+                log.debug(
+                    "sent leader mode command arm=%s attempt=%d/%d",
+                    self.name,
+                    attempt,
+                    _LEADER_MODE_SEND_ATTEMPTS,
+                )
+            except Exception as exc:
+                last_error = exc
+                log.warning(
+                    "leader mode command send failed arm=%s attempt=%d/%d: %s",
+                    self.name,
+                    attempt,
+                    _LEADER_MODE_SEND_ATTEMPTS,
+                    exc,
+                )
+            if attempt < _LEADER_MODE_SEND_ATTEMPTS:
+                time.sleep(_LEADER_MODE_SEND_INTERVAL_S)
+        if successful_sends == 0:
+            raise RuntimeError(f"Failed to send leader mode command to {self.name}") from last_error
         self._configured_role = "leader"
         self._leader_mode_commanded = True
 
@@ -141,6 +174,7 @@ class PyAgxArmAdapter:
         self._configured_role = "follower"
         self._leader_mode_commanded = False
         self._leader_feedback_timestamp = None
+        self._leader_gripper_feedback_baseline = None
 
     def set_normal_mode(self) -> None:
         robot = self._require_robot()
@@ -300,18 +334,34 @@ class PyAgxArmAdapter:
 
     def read_gripper_state(self) -> GripperState:
         if self._gripper is None:
-            return GripperState(value=np.nan, force=np.nan, timestamp_us=now_us(), mode="unknown")
+            return GripperState(value=np.nan, force=np.nan, timestamp_us=0, mode="unknown")
         status_reader = getattr(self._gripper, "get_gripper_status", None)
-        status = _unwrap_message(status_reader()) if callable(status_reader) else None
+        status_message = status_reader() if callable(status_reader) else None
+        status = _unwrap_message(status_message)
         mode = str(getattr(status, "mode", "unknown")).lower()
         if mode not in {"width", "angle"}:
             mode = "unknown"
-        return GripperState(
-            value=_field_float(status, ("value", "position", "pos")),
-            force=_field_float(status, ("force", "torque")),
-            timestamp_us=now_us(),
-            mode=mode,
-        )
+        return _gripper_state(status_message, mode)
+
+    def read_leader_gripper_state(self) -> GripperState:
+        if self._gripper is None:
+            return GripperState(value=np.nan, force=np.nan, timestamp_us=0, mode="unknown")
+        control_reader = getattr(self._gripper, "get_gripper_ctrl_states", None)
+        control_message = control_reader() if callable(control_reader) else None
+        control = _unwrap_message(control_message)
+        control_timestamp = _message_timestamp(control_message)
+        if self._leader_mode_commanded:
+            baseline = self._leader_gripper_feedback_baseline
+            if control_timestamp is None or (baseline is not None and control_timestamp <= baseline):
+                return GripperState(value=np.nan, force=np.nan, timestamp_us=0, mode="unknown")
+        status_code = _enum_int(getattr(control, "status_code", None))
+        if status_code in {0, 1, 2, 3}:
+            return _gripper_state(control_message, "width")
+        if status_code in {4, 5, 6, 7}:
+            return _gripper_state(control_message, "angle")
+        if self._leader_mode_commanded:
+            return GripperState(value=np.nan, force=np.nan, timestamp_us=0, mode="unknown")
+        return self.read_gripper_state()
 
     def disable_gripper(self) -> None:
         if self._gripper is None:
@@ -319,17 +369,31 @@ class PyAgxArmAdapter:
         disable_gripper = getattr(self._gripper, "disable_gripper", None)
         if not callable(disable_gripper):
             raise RuntimeError(f"Gripper on arm {self.name} does not expose disable_gripper()")
-        disable_gripper()
-        deadline = time.monotonic() + 0.5
-        while time.monotonic() < deadline:
-            status_reader = getattr(self._gripper, "get_gripper_status", None)
-            status = _unwrap_message(status_reader()) if callable(status_reader) else None
-            foc_status = getattr(status, "foc_status", None)
-            if getattr(foc_status, "driver_enable_status", None) is False:
-                log.info("disabled leader-input gripper on arm %s", self.name)
-                return
-            time.sleep(0.02)
-        log.warning("gripper disable command sent but not confirmed on arm %s", self.name)
+        status_reader = getattr(self._gripper, "get_gripper_status", None)
+        for attempt in range(1, 4):
+            disable_gripper()
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                status = _unwrap_message(status_reader()) if callable(status_reader) else None
+                foc_status = getattr(status, "foc_status", None)
+                if getattr(foc_status, "driver_enable_status", None) is False:
+                    log.info(
+                        "disabled leader-input gripper on arm %s after %d attempt(s)",
+                        self.name,
+                        attempt,
+                    )
+                    return
+                time.sleep(0.02)
+            if attempt < 3:
+                log.warning(
+                    "leader-input gripper still enabled on arm %s; retrying disable (%d/3)",
+                    self.name,
+                    attempt + 1,
+                )
+        raise RuntimeError(
+            f"Failed to disable leader-input gripper on {self.name}; "
+            "manual gripper teleoperation cannot start"
+        )
 
     def command_gripper(self, value: float, force_n: float, mode: str = "width") -> None:
         if self._gripper is None:
@@ -391,6 +455,17 @@ def _message_timestamp(value: Any) -> float | None:
     return timestamp
 
 
+def _gripper_state(message: Any, mode: str) -> GripperState:
+    value = _unwrap_message(message)
+    timestamp = _message_timestamp(message)
+    return GripperState(
+        value=_field_float(value, ("value", "position", "pos")),
+        force=_field_float(value, ("force", "torque")),
+        timestamp_us=int(round(timestamp * 1_000_000)) if timestamp is not None else 0,
+        mode=mode,
+    )
+
+
 def _call_if_exists(obj: Any, names: tuple[str, ...]) -> Any:
     for name in names:
         method = getattr(obj, name, None)
@@ -447,7 +522,7 @@ def _read_motor_states(robot: Any, dof: int) -> dict[str, np.ndarray]:
         if state is None:
             continue
         velocity[idx] = _field_float(state, ("velocity", "vel", "speed"))
-        torque[idx] = _field_float(state, ("torque", "tau", "tau_ext"))
+        torque[idx] = _field_float(state, ("torque", "tau"))
         current[idx] = _field_float(state, ("current", "iq", "motor_current"))
     return {"velocity": velocity, "torque": torque, "current": current}
 

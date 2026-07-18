@@ -8,8 +8,13 @@ version = "0.1.0"
 description = "Nero dual-arm teleoperation data collection."
 requires-python = ">=3.10"
 dependencies = [
+    "cmeel-tinyxml2>=10,<11; platform_system == 'Linux'",
+    "cmeel-urdfdom>=4,<5; platform_system == 'Linux'",
     "h5py>=3.11",
+    "matplotlib>=3.7",
     "numpy>=1.23,<3",
+    "opencv-python-headless>=4.8",
+    "pin>=3,<4",
     "PyYAML>=6.0",
 ]
 

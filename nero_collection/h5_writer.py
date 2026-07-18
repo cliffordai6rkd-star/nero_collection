@@ -31,9 +31,14 @@ class EpisodeBuffer:
     )
 
     def __post_init__(self) -> None:
-        self.filter_bank = DatasetFilterBank(self.config.robot_states, self.sample_rate_hz)
+        self.filter_bank = DatasetFilterBank(self.config.robot_states)
 
-    def append_teleop(self, timestamp_us: int, values: dict[str, tuple[str, np.ndarray]]) -> None:
+    def append_teleop(
+        self,
+        timestamp_us: int,
+        values: dict[str, tuple[str, np.ndarray]],
+    ) -> dict[str, tuple[str, np.ndarray]]:
+        processed_values: dict[str, tuple[str, np.ndarray]] = {}
         acceleration_values = {
             dataset_name: value
             for dataset_name, (state_name, value) in values.items()
@@ -50,9 +55,15 @@ class EpisodeBuffer:
         for dataset_name, (state_name, value) in values.items():
             if state_name == "acceleration":
                 continue
-            filtered = self.filter_bank.apply(dataset_name, state_name, np.asarray(value))
+            filtered = self.filter_bank.apply(
+                dataset_name,
+                state_name,
+                np.asarray(value),
+                timestamp_us,
+            )
             self.teleop_data[dataset_name].append(filtered)
             self.teleop_state_names[dataset_name] = state_name
+            processed_values[dataset_name] = (state_name, np.asarray(filtered).copy())
 
         acceleration_config = self.config.robot_states.get("acceleration")
         velocity_cutoff_hz = (
@@ -72,9 +83,15 @@ class EpisodeBuffer:
                 dataset_name,
                 "acceleration",
                 acceleration,
+                timestamp_us,
             )
             self.teleop_data[dataset_name].append(acceleration)
             self.teleop_state_names[dataset_name] = "acceleration"
+            processed_values[dataset_name] = (
+                "acceleration",
+                np.asarray(acceleration).copy(),
+            )
+        return processed_values
 
     def append_camera(self, camera_name: str, timestamp_us: int, frame: np.ndarray) -> None:
         self.camera_timestamps_us[camera_name].append(int(timestamp_us))
@@ -115,6 +132,10 @@ class EpisodeBuffer:
                 dataset.attrs["state_name"] = state_name
                 state_config = self.config.robot_states.get(state_name)
                 dataset.attrs["lowpass"] = bool(state_config.lowpass) if state_config else False
+                dataset.attrs["median_window"] = state_config.median_window if state_config else 1
+                if state_config and state_config.lowpass:
+                    dataset.attrs["lowpass_cutoff_hz"] = state_config.lowpass_cutoff_hz
+                    dataset.attrs["filter_timeline"] = "teleop/timestamp_us"
                 if state_name == "acceleration":
                     dataset.attrs["derived_from"] = _velocity_dataset_name(name)
                     dataset.attrs["derivative_method"] = "velocity_lowpass_then_backward_difference"

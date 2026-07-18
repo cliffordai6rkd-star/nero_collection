@@ -1,0 +1,79 @@
+# Static calibration never changes this collection config. It only reuses the
+# follower CAN endpoint and firmware settings.
+collection_config: ../configs/master_slave_can.yaml
+pair: main
+
+model:
+  urdf_path: ../urdf/nero/nero_with_gripper.urdf
+  locked_joint_names: [gripper, gripper_joint1, gripper_joint2]
+  terminal_joint_name: joint7
+  gravity_m_s2: [0.0, 0.0, -9.81]
+
+motion:
+  command_rate_hz: 30.0
+  joint_speed_rad_s: 0.12  # 五次 minimum-jerk 轨迹的最大关节速度，约 6.9 deg/s
+  max_step_rad: 0.01
+  max_motion_velocity_rad_s: 0.4
+  motion_timeout_s: 20.0
+  settle_timeout_s: 8.0
+  settle_duration_s: 1.0
+  sample_rate_hz: 100.0
+  sample_duration_s: 2.0
+  max_static_velocity_rad_s: 0.02
+  max_position_error_rad: 0.02
+  round_count: 3
+  alternate_reverse: true
+
+safety:
+  # The collector refuses to move until every pose has been checked on the
+  # real workcell and this is changed to true.
+  approved: true
+  joint_limit_margin_rad: 0.05
+  max_abs_torque_nm: [20.0, 20.0, 12.0, 12.0, 6.0, 6.0, 6.0]
+
+# Conservative example poses near the configured follower rest_q. These are
+# not collision-checked: review every target before setting safety.approved.
+poses:
+  - {name: rest,       q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033,  0.02744, 1.50378]}
+  - {name: joint2_lo,  q: [0.00000, -0.29689, -0.01138, 1.80020, -0.02033,  0.02744, 1.50378]}
+  - {name: joint2_hi,  q: [0.00000,  0.00311, -0.01138, 1.80020, -0.02033,  0.02744, 1.50378]}
+  - {name: joint3_lo,  q: [0.00000, -0.14689, -0.16138, 1.80020, -0.02033,  0.02744, 1.50378]}
+  - {name: joint3_hi,  q: [0.00000, -0.14689,  0.13862, 1.80020, -0.02033,  0.02744, 1.50378]}
+  - {name: joint4_lo,  q: [0.00000, -0.14689, -0.01138, 1.65020, -0.02033,  0.02744, 1.50378]}
+  - {name: joint4_hi,  q: [0.00000, -0.14689, -0.01138, 1.95020, -0.02033,  0.02744, 1.50378]}
+  - {name: joint5_lo,  q: [0.00000, -0.14689, -0.01138, 1.80020, -0.17033,  0.02744, 1.50378]}
+  - {name: joint5_hi,  q: [0.00000, -0.14689, -0.01138, 1.80020,  0.12967,  0.02744, 1.50378]}
+  - {name: joint6_lo,  q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033, -0.09256, 1.50378]}
+  - {name: joint6_hi,  q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033,  0.14744, 1.50378]}
+  - {name: joint7_mid, q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033,  0.02744, 1.20378]}
+  - {name: combined_a, q: [0.00000, -0.26689,  0.10862, 1.68020,  0.09967, -0.07256, 1.30378]}
+  - {name: combined_b, q: [0.00000, -0.02689, -0.13138, 1.92020, -0.14033,  0.12744, 1.10378]}
+  - {name: joint7_low, q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033,  0.02744, 0.90378]}
+  - {name: combined_c, q: [0.00000, -0.24689, -0.11138, 1.70020, -0.12033,  0.10744, 1.00378]}
+  - {name: combined_d, q: [0.00000, -0.04689,  0.08862, 1.90020,  0.07967, -0.05256, 0.95378]}
+  - {name: combined_e, q: [0.00000, -0.32689,  0.05862, 1.76020, -0.08033,  0.14744, 1.15378]}
+  - {name: combined_f, q: [0.00000,  0.03311, -0.08138, 1.84020,  0.11967, -0.09256, 1.25378]}
+  - {name: combined_g, q: [0.00000, -0.20689,  0.12862, 1.62020,  0.03967,  0.06744, 1.05378]}
+  - {name: combined_h, q: [0.00000, -0.08689, -0.14138, 1.98020, -0.10033, -0.11256, 0.85378]}
+  - {name: combined_i, q: [0.00000, -0.28689,  0.03862, 1.86020,  0.13967,  0.11744, 0.90378]}
+  - {name: combined_j, q: [0.00000, -0.00689,  0.11862, 1.70020, -0.16033,  0.07744, 1.35378]}
+  - {name: combined_k, q: [0.00000, -0.18689, -0.12138, 1.94020,  0.10967, -0.06256, 1.00378]}
+  - {name: combined_l, q: [0.00000, -0.10689,  0.07862, 1.66020, -0.13033,  0.13744, 1.20378]}
+  - {name: combined_m, q: [0.00000, -0.31689, -0.07138, 1.88020,  0.05967, -0.10256, 0.95378]}
+  - {name: combined_n, q: [0.00000,  0.02311,  0.04862, 1.74020, -0.09033,  0.09744, 1.10378]}
+  - {name: combined_o, q: [0.00000, -0.23689,  0.09862, 1.92020, -0.15033,  0.04744, 1.30378]}
+  - {name: combined_p, q: [0.00000, -0.05689, -0.10138, 1.64020,  0.12967, -0.08256, 0.90378]}
+  - {name: combined_q, q: [0.00000, -0.15689,  0.13862, 1.84020, -0.11033,  0.12744, 1.15378]}
+
+fit:
+  min_poses: 20
+  max_condition_number: 1000.0
+  mass_bounds_kg: [0.05, 2.0]
+  max_abs_com_m: 0.30
+  max_abs_bias_nm: [8.0, 8.0, 6.0, 6.0, 4.0, 4.0, 4.0]
+  holdout_fraction: 0.30
+  split_seed: 20260718
+  min_holdout_improvement_ratio: 0.30
+  max_round_mass_relative_range: 0.05
+  max_round_com_spread_m: 0.01
+  max_round_bias_range_nm: [0.4, 0.4, 0.3, 0.3, 0.2, 0.2, 0.2]
