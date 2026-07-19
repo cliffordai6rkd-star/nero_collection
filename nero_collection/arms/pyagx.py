@@ -219,10 +219,19 @@ class PyAgxArmAdapter:
 
     def read_state(self) -> ArmState:
         robot = self._require_robot()
-        q = _as_float_array(robot.get_joint_angles(), self.dof)
+        joint_reader = (
+            getattr(robot, "get_leader_joint_angles", None)
+            if self._leader_mode_commanded
+            else getattr(robot, "get_joint_angles", None)
+        )
+        q_message = joint_reader() if callable(joint_reader) else robot.get_joint_angles()
+        q_acquired_timestamp_us = now_us()
+        q = _as_float_array(q_message, self.dof)
         motor_states = _read_motor_states(robot, self.dof)
         ee_pose = _read_pose(robot)
-        timestamp_us = now_us()
+        acquired_timestamp_us = now_us()
+        q_timestamp_us = _message_timestamp_us(q_message)
+        timestamp_us = q_timestamp_us or q_acquired_timestamp_us
         dq = motor_states["velocity"]
         ddq = _finite_difference_accel(dq, self._last_state, timestamp_us)
         state = ArmState(
@@ -233,6 +242,11 @@ class PyAgxArmAdapter:
             torque=motor_states["torque"],
             current=motor_states["current"],
             timestamp_us=timestamp_us,
+            acquired_timestamp_us=acquired_timestamp_us,
+            q_timestamp_us=q_timestamp_us,
+            q_acquired_timestamp_us=q_acquired_timestamp_us,
+            motor_timestamp_us=motor_states["timestamp_us"],
+            motor_acquired_timestamp_us=motor_states["acquired_timestamp_us"],
         )
         self._last_state = state
         return state
@@ -455,6 +469,11 @@ def _message_timestamp(value: Any) -> float | None:
     return timestamp
 
 
+def _message_timestamp_us(value: Any) -> int:
+    timestamp = _message_timestamp(value)
+    return int(round(timestamp * 1_000_000)) if timestamp is not None else 0
+
+
 def _gripper_state(message: Any, mode: str) -> GripperState:
     value = _unwrap_message(message)
     timestamp = _message_timestamp(message)
@@ -510,21 +529,38 @@ def _read_motor_states(robot: Any, dof: int) -> dict[str, np.ndarray]:
     velocity = np.full(dof, np.nan, dtype=np.float64)
     torque = np.full(dof, np.nan, dtype=np.float64)
     current = np.full(dof, np.nan, dtype=np.float64)
+    timestamp_us = np.zeros(dof, dtype=np.int64)
+    acquired_timestamp_us = np.zeros(dof, dtype=np.int64)
     reader = getattr(robot, "get_motor_states", None) or getattr(robot, "get_motor_state", None)
     if not callable(reader):
-        return {"velocity": velocity, "torque": torque, "current": current}
+        return {
+            "velocity": velocity,
+            "torque": torque,
+            "current": current,
+            "timestamp_us": timestamp_us,
+            "acquired_timestamp_us": acquired_timestamp_us,
+        }
     for idx in range(dof):
         try:
             state = reader(idx + 1)
         except TypeError:
             state = reader(idx)
-        state = _unwrap_message(state)
+        acquired_timestamp_us[idx] = now_us()
+        state_message = state
+        state = _unwrap_message(state_message)
         if state is None:
             continue
         velocity[idx] = _field_float(state, ("velocity", "vel", "speed"))
         torque[idx] = _field_float(state, ("torque", "tau"))
         current[idx] = _field_float(state, ("current", "iq", "motor_current"))
-    return {"velocity": velocity, "torque": torque, "current": current}
+        timestamp_us[idx] = _message_timestamp_us(state_message)
+    return {
+        "velocity": velocity,
+        "torque": torque,
+        "current": current,
+        "timestamp_us": timestamp_us,
+        "acquired_timestamp_us": acquired_timestamp_us,
+    }
 
 
 def _field_float(obj: Any, names: tuple[str, ...]) -> float:

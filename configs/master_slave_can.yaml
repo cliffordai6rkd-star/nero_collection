@@ -52,46 +52,60 @@ output:
   directory: ../runs/nero_test_1
   prefix: episode
 
-# 开启后显示 0.5 秒前的从臂 q、tau 和七轴 tau_ext=tau_id-tau_follower。
+# H5 保存阶段使用与动力学标定相同的非因果处理；SDK 原始字段另存为 *_raw。
+dynamics_processing:
+  enabled: true
+  state_method: spline
+  spline_smoothing_rad2: 1.0e-5
+  fourier_fundamental_hz: 0.1
+  fourier_harmonics: 8
+  torque_lowpass_hz: 12.0
+  torque_median_window: 3
+  min_samples: 20
+
+# 开启后用 0.5 秒固定延迟重建 dq/ddq，并显示七轴 tau_ext=tau_model-tau_follower。
 realtime_plot:
   enabled: true
   window_s: 10.0
   update_rate_hz: 20.0
   inverse_dynamics:
-    urdf_path: ../urdf/nero/nero_with_gripper.urdf
+    # urdf_path: ../urdf/nero/nero_with_gripper.urdf
+    urdf_path: ../urdf/nero/nero_with_gripper_identified.urdf
+    manifest_path: ../calibration/results/dynamics_manifest.yaml
     delay_s: 0.5
     locked_joint_names: [gripper, gripper_joint1, gripper_joint2]
     gravity_m_s2: [0.0, 0.0, -9.81]
 
-cameras:
-  - name: side
-    enabled: true
-    backend: v4l2
-    device: /dev/video2
-    pixel_format: MJPG
-    buffer_size: 1
-    startup_timeout_s: 3.0
-    width: 640
-    height: 480
-    fps: 30.0
-    exposure: null
-    depth: false
-    crop: [0, null, 0, null]
-    output_size: [256, 192]
-  - name: wrist
-    enabled: true
-    backend: v4l2
-    device: /dev/video4
-    pixel_format: MJPG
-    buffer_size: 1
-    startup_timeout_s: 5.0
-    width: 640
-    height: 480
-    fps: 30.0
-    exposure: null
-    depth: false
-    crop: [0, null, 0, null]
-    output_size: [256, 192]
+# cameras:
+  # - name: side
+  #   enabled: true
+  #   backend: v4l2
+  #   device: /dev/video2
+  #   pixel_format: MJPG
+  #   buffer_size: 1
+  #   startup_timeout_s: 3.0
+  #   width: 640
+  #   height: 480
+  #   fps: 30.0
+  #   exposure: null
+  #   depth: false
+  #   crop: [0, null, 0, null]
+  #   output_size: [256, 192]
+
+  # - name: wrist
+  #   enabled: true
+  #   backend: v4l2
+  #   device: /dev/video4
+  #   pixel_format: MJPG
+  #   buffer_size: 1
+  #   startup_timeout_s: 5.0
+  #   width: 640
+  #   height: 480
+  #   fps: 30.0
+  #   exposure: null
+  #   depth: false
+  #   # crop: [0, null, 0, null]
+  #   output_size: [256, 192]
 
 gripper:
   enabled: true
@@ -117,13 +131,14 @@ robot_states:
   acceleration:
     enabled: true
     lowpass: true
-    # ddq is derived from a causal 10 Hz low-pass of raw dq on the teleop timeline.
+    # 仅用于录制期间的兼容预览；H5 规范 dq/ddq 在保存时由 q(t) 样条解析计算。
     velocity_lowpass_cutoff_hz: 10.0
   ee_pose:
     enabled: true
     lowpass: false
   torque:
     enabled: true
+    # 仅用于录制期间的实时预览；H5 规范 tau 使用 dynamics_processing 的零相位滤波。
     lowpass: true
     lowpass_cutoff_hz: 10.0
     median_window: 3

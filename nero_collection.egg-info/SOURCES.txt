@@ -4,9 +4,11 @@ nero_collection/__init__.py
 nero_collection/cameras.py
 nero_collection/cli.py
 nero_collection/config.py
+nero_collection/contact_wrench.py
 nero_collection/filters.py
 nero_collection/h5_writer.py
 nero_collection/keyboard.py
+nero_collection/realtime_plot.py
 nero_collection/time_utils.py
 nero_collection.egg-info/PKG-INFO
 nero_collection.egg-info/SOURCES.txt
@@ -22,3 +24,12 @@ nero_collection/arms/mock.py
 nero_collection/arms/pyagx.py
 nero_collection/teleop/__init__.py
 nero_collection/teleop/master_slave.py
+tests/test_acceleration_filter.py
+tests/test_cameras.py
+tests/test_can_setup.py
+tests/test_dynamics_identification.py
+tests/test_keyboard.py
+tests/test_mit_control.py
+tests/test_post_save_reset.py
+tests/test_realtime_plot.py
+tests/test_startup_sequence.py

@@ -27,6 +27,18 @@ class OutputConfig:
 
 
 @dataclass(frozen=True)
+class DynamicsProcessingConfig:
+    enabled: bool = False
+    state_method: str = "spline"
+    spline_smoothing_rad2: float = 1.0e-5
+    fourier_fundamental_hz: float = 0.1
+    fourier_harmonics: int = 8
+    torque_lowpass_hz: float = 12.0
+    torque_median_window: int = 3
+    min_samples: int = 20
+
+
+@dataclass(frozen=True)
 class ContactWrenchConfig:
     urdf_path: Path = Path("urdf/nero/nero_with_gripper.urdf")
     frame_name: str = "gripper_base"
@@ -44,6 +56,7 @@ class ContactWrenchConfig:
 @dataclass(frozen=True)
 class InverseDynamicsConfig:
     urdf_path: Path = Path("urdf/nero/nero_with_gripper.urdf")
+    manifest_path: Path | None = None
     delay_s: float = 0.5
     locked_joint_names: tuple[str, ...] = (
         "gripper",
@@ -167,6 +180,7 @@ class CollectionConfig:
     cameras: tuple[CameraConfig, ...] = ()
     gripper: GripperConfig = field(default_factory=GripperConfig)
     realtime_plot: RealtimePlotConfig = field(default_factory=RealtimePlotConfig)
+    dynamics_processing: DynamicsProcessingConfig = field(default_factory=DynamicsProcessingConfig)
     robot_states: dict[str, StateParamConfig] = field(default_factory=dict)
     raw_yaml: str = ""
 
@@ -202,6 +216,7 @@ def load_config(path: str | Path) -> CollectionConfig:
     cameras = tuple(_parse_camera(item) for item in data.get("cameras", []) if item.get("enabled", True))
     gripper = _parse_gripper(data.get("gripper", {}))
     realtime_plot = _parse_realtime_plot(data.get("realtime_plot", {}), config_path.parent)
+    dynamics_processing = _parse_dynamics_processing(data.get("dynamics_processing", {}))
     robot_states = _parse_state_params(data.get("robot_states", {}))
     return CollectionConfig(
         teleop=teleop,
@@ -209,6 +224,7 @@ def load_config(path: str | Path) -> CollectionConfig:
         cameras=cameras,
         gripper=gripper,
         realtime_plot=realtime_plot,
+        dynamics_processing=dynamics_processing,
         robot_states=robot_states,
         raw_yaml=raw_yaml,
     )
@@ -309,6 +325,44 @@ def _parse_output(data: dict[str, Any], base_dir: Path) -> OutputConfig:
     if not directory.is_absolute():
         directory = (base_dir / directory).resolve()
     return OutputConfig(directory=directory, prefix=str(data.get("prefix", "episode")))
+
+
+def _parse_dynamics_processing(data: dict[str, Any]) -> DynamicsProcessingConfig:
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError("dynamics_processing must be a mapping")
+    state_method = str(data.get("state_method", "spline")).lower()
+    if state_method not in {"spline", "fourier"}:
+        raise ValueError("dynamics_processing.state_method must be spline or fourier")
+    smoothing = float(data.get("spline_smoothing_rad2", 1.0e-5))
+    fundamental_hz = float(data.get("fourier_fundamental_hz", 0.1))
+    harmonics = int(data.get("fourier_harmonics", 8))
+    torque_lowpass_hz = float(data.get("torque_lowpass_hz", 12.0))
+    torque_median_window = int(data.get("torque_median_window", 3))
+    min_samples = int(data.get("min_samples", 20))
+    if not isfinite(smoothing) or smoothing < 0:
+        raise ValueError("dynamics_processing.spline_smoothing_rad2 must be non-negative and finite")
+    if not isfinite(fundamental_hz) or fundamental_hz <= 0:
+        raise ValueError("dynamics_processing.fourier_fundamental_hz must be positive and finite")
+    if harmonics < 1:
+        raise ValueError("dynamics_processing.fourier_harmonics must be positive")
+    if not isfinite(torque_lowpass_hz) or torque_lowpass_hz <= 0:
+        raise ValueError("dynamics_processing.torque_lowpass_hz must be positive and finite")
+    if torque_median_window < 1 or torque_median_window % 2 == 0:
+        raise ValueError("dynamics_processing.torque_median_window must be a positive odd integer")
+    if min_samples < 4:
+        raise ValueError("dynamics_processing.min_samples must be at least 4")
+    return DynamicsProcessingConfig(
+        enabled=bool(data.get("enabled", False)),
+        state_method=state_method,
+        spline_smoothing_rad2=smoothing,
+        fourier_fundamental_hz=fundamental_hz,
+        fourier_harmonics=harmonics,
+        torque_lowpass_hz=torque_lowpass_hz,
+        torque_median_window=torque_median_window,
+        min_samples=min_samples,
+    )
 
 
 def _parse_camera(data: dict[str, Any]) -> CameraConfig:
@@ -468,6 +522,12 @@ def _parse_realtime_plot(
     ).expanduser()
     if not urdf_path.is_absolute():
         urdf_path = (base_dir / urdf_path).resolve()
+    manifest_value = inverse_data.get("manifest_path")
+    manifest_path = None
+    if manifest_value is not None:
+        manifest_path = Path(manifest_value).expanduser()
+        if not manifest_path.is_absolute():
+            manifest_path = (base_dir / manifest_path).resolve()
     delay_s = float(inverse_data.get("delay_s", 0.5))
     if not isfinite(delay_s) or delay_s < 0:
         raise ValueError("realtime_plot.inverse_dynamics.delay_s must be non-negative and finite")
@@ -488,6 +548,7 @@ def _parse_realtime_plot(
         update_rate_hz=update_rate_hz,
         inverse_dynamics=InverseDynamicsConfig(
             urdf_path=urdf_path,
+            manifest_path=manifest_path,
             delay_s=delay_s,
             locked_joint_names=locked_joint_names,
             gravity_m_s2=gravity,

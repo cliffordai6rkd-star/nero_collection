@@ -9,4 +9,6 @@ dependencies:
   - pyyaml>=6.0
   - opencv
   - matplotlib>=3.7
+  - mujoco>=3.3,<4
   - pinocchio>=3,<4
+  - scipy>=1.10,<2

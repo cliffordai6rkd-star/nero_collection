@@ -67,6 +67,7 @@ class MockArm:
     def read_state(self) -> ArmState:
         self._ensure_connected()
         self._integrate()
+        timestamp_us = now_us()
         return ArmState(
             q=self._q.copy(),
             dq=self._dq.copy(),
@@ -74,7 +75,12 @@ class MockArm:
             ee_pose=matrix_from_joint_stub(self._q),
             torque=0.05 * np.sin(self._q),
             current=0.2 * np.cos(self._q),
-            timestamp_us=now_us(),
+            timestamp_us=timestamp_us,
+            acquired_timestamp_us=timestamp_us,
+            q_timestamp_us=timestamp_us,
+            q_acquired_timestamp_us=timestamp_us,
+            motor_timestamp_us=np.full(self.dof, timestamp_us, dtype=np.int64),
+            motor_acquired_timestamp_us=np.full(self.dof, timestamp_us, dtype=np.int64),
         )
 
     def read_leader_joint_positions(self) -> np.ndarray:

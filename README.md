@@ -210,7 +210,7 @@ python scripts/print_arm_q.py \
 8. 遥操过程中按空格停止，随后按 `y` 保存或按 `n` 丢弃。
 9. 当 `reset_after_episode: true` 时，无论按 `y` 还是 `n`，两臂都会再次进入 follower 并共同复位。
 
-当 `realtime_plot.enabled: true` 时，机械臂启动完成后会额外打开一个实时窗口。按 `r` 开始录制后，窗口按三列显示从臂 `q_follower`、`tau_follower` 和 Pinocchio 逆动力学关节残差 `tau_ext = tau_id - tau_follower`。三列均包含 `joint1 ... joint7`，使用同一历史时间戳，默认显示 `0.5 s` 前的估计，横轴保留最近 `window_s` 秒。`tau_ext` 不再通过雅可比最小二乘转换为 6D 力系，避免病态雅可比放大噪声。绘图和逆动力学计算运行在独立进程中，不改变机械臂采样率；关闭窗口后遥操和数采继续运行。
+当 `realtime_plot.enabled: true` 时，机械臂启动完成后会额外打开一个实时窗口。按 `r` 开始录制后，窗口按三列显示从臂 `q_follower`、`tau_follower` 和完整辨识模型的关节残差 `tau_ext = tau_model - tau_follower`。在线计算利用默认 `0.5 s` 固定延迟保留目标点前后的实测 `q`，按标定同款平滑样条解析计算 `dq/ddq`，不使用 V112 被 SDK 置零的速度字段；力矩也在同一窗口内重采样并执行零相位滤波。绘图和逆动力学计算运行在独立进程中，不改变机械臂采样率；关闭窗口后遥操和数采继续运行。
 
 程序运行时的终端提示和日志均为英文。
 
@@ -249,9 +249,11 @@ python scripts/print_arm_q.py \
 - `realtime_plot.window_s`: 滑动时间窗口长度；当前配置为 `10.0` 秒。
 - `realtime_plot.update_rate_hz`: 图形刷新频率。它只影响显示，不改变 `teleop.command.sample_rate_hz`。
 - `realtime_plot.inverse_dynamics.urdf_path`: 用于计算 `tau_id` 的 Pinocchio 模型。
+- `realtime_plot.inverse_dynamics.manifest_path`: 辨识输出的 manifest；实时计算从中加载库仑摩擦、黏性摩擦、关节偏置和库仑速度尺度，并校验其 URDF 与关节顺序。
 - `realtime_plot.inverse_dynamics.delay_s`: 估计显示延迟；默认计算并显示 `0.5 s` 前的同时间戳 `q/dq/ddq/tau`。
 - `realtime_plot.inverse_dynamics.locked_joint_names`: 从完整 URDF 裁剪夹爪关节，使 Pinocchio 模型只保留七个机械臂关节。
 - `realtime_plot.inverse_dynamics.gravity_m_s2`: Pinocchio RNEA 使用的基坐标系重力向量。
+- `dynamics_processing.*`: 在线固定延迟计算和 H5 保存共同使用的状态重建、力矩中值窗口与零相位低通参数；当前数值与 `calibration/config.yaml` 的标定预处理一致。
 - `cameras[*].backend`: 当前两台真实相机使用 `v4l2`，通过 OpenCV 后台线程抓帧，不阻塞机械臂控制循环。
 - `cameras[*].device`: 当前 `side=/dev/video2`、`wrist=/dev/video4`。本机相机的 USB 身份字符串发生过变化，因此使用实际验证过的设备节点。
 - `cameras[*].pixel_format`、`width`、`height`、`fps`: 两台均请求 `MJPG 640x480@30`。H5 使用各相机逐帧真实时间戳，不假定两台相机帧率相同或硬件同步。
@@ -273,37 +275,44 @@ python -m pip install --upgrade "git+https://github.com/agilexrobotics/pyAgxArm.
 
 生成文件遵循 `/home/rei/mnt/code/lcx/data/train_episode/wipe_board/wipe_board` 的风格：
 
-- 根属性：`format=factr_multimodal_episode/v2`、`saved_at_us`
+- 根属性：`format=factr_multimodal_episode/v3`、`saved_at_us`
 - `/config_yaml`: 本次采集配置原文
-- `/teleop/timestamp_us`: 机械臂遥操时间线
+- `/teleop/timestamp_us`: 主 pair 从臂关节角观测时间；优先使用 CAN 帧 Unix 时间，缺失时使用该次 getter 返回的主机 Unix 时间；重复反馈帧不重复写入
 - `/teleop/q_leader`、`q_follower`、`q_cmd`
 - `/teleop/dq_leader`、`dq_follower`
 - `/teleop/ddq_leader`、`ddq_follower`
 - `/teleop/ee_pose`、`ee_pose_leader`、`cmd_ee_pose`
 - `/teleop/tau_leader`、`tau_follower`
 - `/teleop/current_leader`、`current_follower`
+- `/teleop/q_timestamp_{leader,follower}_us`：SDK 聚合关节角 CAN 帧时间戳
+- `/teleop/q_acquired_timestamp_{leader,follower}_us`：关节角 getter 返回时的主机 Unix 时间
+- `/teleop/motor_timestamp_{leader,follower}_us`：七轴电机状态 CAN 帧时间戳
+- `/teleop/motor_acquired_timestamp_{leader,follower}_us`：七轴 motor getter 各自返回时的主机 Unix 时间
+- `/teleop/q_{leader,follower}_raw`、`tau_{leader,follower}_raw`：未拟合、未滤波的 SDK 数据
+- `/teleop/dq_{leader,follower}_firmware_raw`、`ddq_{leader,follower}_adapter_raw`：仅用于诊断的固件速度和适配器加速度
+- `/teleop/tau_id_follower`、`tau_friction_follower`、`tau_bias_follower`、`tau_model_follower`、`tau_ext_follower`：保存后按完整辨识模型计算的力矩分量与残差
 - `/teleop/gripper_state`、`gripper_value`：从夹爪实际开合宽度兼容字段，单位 m
 - `/teleop/gripper_leader`、`gripper_follower`、`gripper_cmd`：主夹爪开合宽度、从夹爪实际开合宽度和开合命令，单位均为 m
 - `/cameras/<name>/frames` 和 `/cameras/<name>/timestamp_us`，仅在相机实际接入时写入
 
 单个主从 pair 时，`q_leader`、`q_follower`、`q_cmd` 的 shape 是 `(N, 7)`，`ee_pose`、`cmd_ee_pose` 的 shape 是 `(N, 4, 4)`，和 `wipe_board` 样例更接近。代码仍保留多 pair 扩展能力；多 pair 时 joint 会按 `/teleop` 的 `arm_names` 属性顺序拼接。
 
-`dq_leader` 和 `dq_follower` 保留 SDK 返回的原始速度。`ddq_leader` 和
-`ddq_follower` 不使用 SDK 适配器内部的瞬时差分结果，而是在每个 episode 的
-`teleop/timestamp_us` 时间线上，先对对应的原始 `dq` 做因果一阶低通，再按真实
-时间间隔做后向差分。截止频率由
-`robot_states.acceleration.velocity_lowpass_cutoff_hz` 配置；首帧加速度为零。
-H5 中的加速度 dataset 会记录计算方法、速度来源和截止频率属性。
+H5 规范 `q_leader/q_follower` 先按各自有效观测时间拟合平滑样条，再重采样到严格递增的
+`teleop/timestamp_us` 主从臂公共时间线；`dq`、`ddq` 分别取该样条的一阶、二阶解析导数。
+有效观测时间只在 CAN 时间持续更新时采用 CAN，否则采用对应 getter 的真实主机返回时间，
+并在 dataset 属性中记录实际使用了哪些回退，不按样本序号伪造时间。
+V112 固件速度和适配器瞬时加速度只写入带 `_raw` 后缀的诊断 dataset，不再作为训练真值。
 
-`torque` 和 `current` 的滤波顺序为 3 点因果中值去尖峰，再做一阶指数 IIR：
-`alpha = 1 - exp(-2*pi*fc*dt)`。`dt` 来自实际 `/teleop/timestamp_us`，不使用配置的
-控制循环频率代替真实采样间隔。H5 dataset 会记录 `median_window`、
-`lowpass_cutoff_hz` 和滤波时间线属性。
+H5 规范 `tau_leader/tau_follower` 先按每轴电机 CAN 时间戳重采样到同一时间线，再执行
+3 点中值和四阶 Butterworth 零相位低通。录制期间的因果滤波只用于兼容预览，不会覆盖
+保存阶段使用的原始数据。某轴 motor CAN 时间戳缺失、倒退或不再更新时，该轴使用自身
+motor getter 的主机返回时间，原始 SDK 时间戳仍保留。每个规范和 raw dataset 都写入处理方法及源时间戳属性。
 
-实时 `tau_ext` 仅用于可视化，目前不写入 H5。估计器直接计算
-`tau_id = RNEA(q,dq,ddq)`、`tau_ext = tau_id - tau_follower`，不执行雅可比伪逆或
-最小二乘。URDF 惯量误差、关节摩擦、电流估算力矩偏置以及任何外部接触都会进入
-该残差，因此在完成静态动力学和偏置标定前，不能把它解释为定量外力矩。
+实时 `tau_ext` 仅用于可视化，目前不写入 H5。固定延迟窗口先获得真实 `dq/ddq` 和对齐后的
+`tau`；配置 manifest 后，估计器按离线辨识的
+同一模型计算 `tau_model = RNEA(q,dq,ddq) + tau_c*tanh(dq/v_s) + tau_v*dq + bias`，
+再计算 `tau_ext = tau_model - tau_follower`；不执行雅可比伪逆或最小二乘。未配置
+`manifest_path` 时保持兼容，只使用 RNEA，此时摩擦和力矩偏置仍会进入残差。
 
 ## 真实 SDK 接入点
 

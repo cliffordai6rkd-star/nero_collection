@@ -48,7 +48,11 @@ def run_collection(
 ) -> int:
     teleop = MasterSlaveTeleop(config)
     cameras = CameraManager.from_config(config.cameras)
-    realtime_plot = RealtimeJointPlotter(config.realtime_plot, config.robot_states)
+    realtime_plot = RealtimeJointPlotter(
+        config.realtime_plot,
+        config.robot_states,
+        config.dynamics_processing,
+    )
     output_dir = config.output.directory
     output_dir.mkdir(parents=True, exist_ok=True)
     episode_index = _next_episode_index(output_dir, config.output.prefix)
@@ -161,8 +165,9 @@ def _record_episode(
             return
 
         timestamp_us, values = teleop.teleop_step()
-        processed_values = buffer.append_teleop(timestamp_us, values)
-        realtime_plot.append(timestamp_us, processed_values)
+        accepted = buffer.append_teleop(timestamp_us, values)
+        if accepted:
+            realtime_plot.append(timestamp_us, values)
         for frame in cameras.poll():
             buffer.append_camera(frame.camera_name, frame.timestamp_us, frame.frame)
 

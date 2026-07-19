@@ -316,7 +316,7 @@ class MasterSlaveTeleop:
             follower_states.append(follower_before)
             q_cmds.append(q_cmd)
 
-        timestamp_us = now_us()
+        timestamp_us = _primary_observation_timestamp_us(follower_states)
         values = self._build_teleop_values(leader_states, follower_states, q_cmds)
         self._update_gripper_teleop(values)
         return timestamp_us, values
@@ -676,6 +676,28 @@ class MasterSlaveTeleop:
             values["q_leader"] = ("q", _concat([state.q for state in leader_states]))
             values["q_follower"] = ("q", _concat([state.q for state in follower_states]))
             values["q_cmd"] = ("q", _concat(q_cmds))
+            values["q_timestamp_leader_us"] = (
+                "timestamp",
+                np.asarray([_state_q_timestamp_us(state) for state in leader_states], dtype=np.int64),
+            )
+            values["q_timestamp_follower_us"] = (
+                "timestamp",
+                np.asarray([_state_q_timestamp_us(state) for state in follower_states], dtype=np.int64),
+            )
+            values["q_acquired_timestamp_leader_us"] = (
+                "timestamp",
+                np.asarray(
+                    [_state_q_acquired_timestamp_us(state) for state in leader_states],
+                    dtype=np.int64,
+                ),
+            )
+            values["q_acquired_timestamp_follower_us"] = (
+                "timestamp",
+                np.asarray(
+                    [_state_q_acquired_timestamp_us(state) for state in follower_states],
+                    dtype=np.int64,
+                ),
+            )
 
         if states.get("velocity") and states["velocity"].enabled:
             values["dq_leader"] = ("velocity", _concat([state.dq for state in leader_states]))
@@ -694,6 +716,22 @@ class MasterSlaveTeleop:
             values["tau_leader"] = ("torque", _concat([state.torque for state in leader_states]))
             follower_tau = _concat([state.torque for state in follower_states])
             values["tau_follower"] = ("torque", follower_tau)
+            values["motor_timestamp_leader_us"] = (
+                "timestamp",
+                _concat([_state_motor_timestamps(state) for state in leader_states]),
+            )
+            values["motor_timestamp_follower_us"] = (
+                "timestamp",
+                _concat([_state_motor_timestamps(state) for state in follower_states]),
+            )
+            values["motor_acquired_timestamp_leader_us"] = (
+                "timestamp",
+                _concat([_state_motor_acquired_timestamps(state) for state in leader_states]),
+            )
+            values["motor_acquired_timestamp_follower_us"] = (
+                "timestamp",
+                _concat([_state_motor_acquired_timestamps(state) for state in follower_states]),
+            )
 
         if states.get("current") and states["current"].enabled:
             values["current_leader"] = ("current", _concat([state.current for state in leader_states]))
@@ -706,6 +744,43 @@ def _rest_q(rest_q: tuple[float, ...]) -> np.ndarray:
     if rest_q:
         return np.asarray(rest_q, dtype=np.float64)
     return np.zeros(7, dtype=np.float64)
+
+
+def _primary_observation_timestamp_us(states: list[ArmState]) -> int:
+    if not states:
+        return now_us()
+    state = states[0]
+    return int(
+        state.q_timestamp_us
+        or state.q_acquired_timestamp_us
+        or state.timestamp_us
+        or state.acquired_timestamp_us
+        or now_us()
+    )
+
+
+def _state_q_timestamp_us(state: ArmState) -> int:
+    return int(state.q_timestamp_us)
+
+
+def _state_q_acquired_timestamp_us(state: ArmState) -> int:
+    return int(state.q_acquired_timestamp_us or state.acquired_timestamp_us or state.timestamp_us)
+
+
+def _state_motor_timestamps(state: ArmState) -> np.ndarray:
+    timestamps = np.asarray(state.motor_timestamp_us, dtype=np.int64).reshape(-1)
+    if timestamps.size == state.q.size:
+        return timestamps
+    fallback = state.timestamp_us or state.acquired_timestamp_us
+    return np.full(state.q.size, fallback, dtype=np.int64)
+
+
+def _state_motor_acquired_timestamps(state: ArmState) -> np.ndarray:
+    timestamps = np.asarray(state.motor_acquired_timestamp_us, dtype=np.int64).reshape(-1)
+    if timestamps.size == state.q.size:
+        return timestamps
+    fallback = state.acquired_timestamp_us or state.timestamp_us
+    return np.full(state.q.size, fallback, dtype=np.int64)
 
 
 def _concat(values: list[np.ndarray]) -> np.ndarray:

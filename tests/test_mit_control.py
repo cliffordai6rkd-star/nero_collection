@@ -89,6 +89,10 @@ def test_master_slave_config_has_valid_control_parameters() -> None:
     assert all(-5.0 <= value <= 5.0 for value in command.mit.kd)
     assert config.gripper.teleop_enabled is True
     assert config.gripper.attach_to == "both"
+    assert config.realtime_plot.inverse_dynamics.manifest_path is not None
+    assert config.realtime_plot.inverse_dynamics.manifest_path.is_file()
+    assert config.dynamics_processing.enabled is True
+    assert config.dynamics_processing.state_method == "spline"
 
 
 @pytest.mark.parametrize(

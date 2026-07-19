@@ -12,14 +12,21 @@ dependencies = [
     "cmeel-urdfdom>=4,<5; platform_system == 'Linux'",
     "h5py>=3.11",
     "matplotlib>=3.7",
+    "mujoco>=3.3,<4",
     "numpy>=1.23,<3",
     "opencv-python-headless>=4.8",
     "pin>=3,<4",
     "PyYAML>=6.0",
+    "scipy>=1.10,<2",
 ]
 
 [project.scripts]
 nero-collect = "nero_collection.cli:main"
+
+[project.optional-dependencies]
+gpu-identification = [
+    "jax[cuda12]==0.6.2; platform_system == 'Linux' and python_version < '3.11'",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

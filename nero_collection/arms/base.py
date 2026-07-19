@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -15,6 +15,15 @@ class ArmState:
     torque: np.ndarray
     current: np.ndarray
     timestamp_us: int
+    acquired_timestamp_us: int = 0
+    q_timestamp_us: int = 0
+    q_acquired_timestamp_us: int = 0
+    motor_timestamp_us: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=np.int64)
+    )
+    motor_acquired_timestamp_us: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=np.int64)
+    )
 
 
 @dataclass

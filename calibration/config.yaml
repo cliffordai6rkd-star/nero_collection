@@ -1,79 +1,116 @@
-# Static calibration never changes this collection config. It only reuses the
-# follower CAN endpoint and firmware settings.
 collection_config: ../configs/master_slave_can.yaml
 pair: main
 
 model:
-  urdf_path: ../urdf/nero/nero_with_gripper.urdf
+  urdf_path: ../urdf/nero/nero_with_gripper_identified.urdf
+  # urdf_path: ../urdf/nero/nero_with_grippe.urdf
   locked_joint_names: [gripper, gripper_joint1, gripper_joint2]
-  terminal_joint_name: joint7
+  # This order is checked against the reduced Pinocchio model before any motion.
+  joint_names: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
   gravity_m_s2: [0.0, 0.0, -9.81]
 
-motion:
-  command_rate_hz: 30.0
-  joint_speed_rad_s: 0.12  # 五次 minimum-jerk 轨迹的最大关节速度，约 6.9 deg/s
-  max_step_rad: 0.01
-  max_motion_velocity_rad_s: 0.4
-  motion_timeout_s: 20.0
-  settle_timeout_s: 8.0
-  settle_duration_s: 1.0
+excitation:
   sample_rate_hz: 100.0
-  sample_duration_s: 2.0
-  max_static_velocity_rad_s: 0.02
-  max_position_error_rad: 0.02
-  round_count: 3
-  alternate_reverse: true
+  duration_s: 10.0
+  fundamental_hz: 0.1
+  harmonics: 5
+  optimization_trials: 500
+  amplitude_rad: [0.35, 0.35, 0.35, 0.35, 0.18, 0.11, 0.18]
+  max_velocity_rad_s: [0.28, 0.25, 0.28, 0.23, 0.32, 0.25, 0.32]
+  max_acceleration_rad_s2: [0.65, 0.58, 0.65, 0.52, 0.75, 0.60, 0.75]
+  joint_limit_margin_rad: 0.10
+  max_tracking_error_rad: [0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06]
+  start_move_speed_rad_s: 0.35
+  profiles:
+    - name: train_a
+      role: train
+      seed: 20260719
+      center_rad: [0.3, -0.3, 0.3, 1.55, 0.3, 0.3, 0.3]
+      repetitions: 2
+      trajectory_path: data/excitation_train.npz
+      dataset_path: data/dynamics_train_a.npz
+    - name: train_b
+      role: train
+      seed: 20260721
+      center_rad: [-0.10, -0.02, -0.10, 1.68, -0.08, 0.12, -0.18]
+      repetitions: 2
+      trajectory_path: data/excitation_train_b.npz
+      dataset_path: data/dynamics_train_b.npz
+    - name: train_c
+      role: train
+      seed: 20260720
+      center_rad: [0.30, -0.28, 0.30, 1.42, 0.30, -0.30, 0.30]
+      repetitions: 2
+      trajectory_path: data/excitation_train_c.npz
+      dataset_path: data/dynamics_train_c.npz
+    - name: train_low
+      role: train
+      seed: 20260718
+      center_rad: [0.0, -0.65, 0.0, 1.10, 0.0, 0.0, 0.0]
+
+    - name: train_mid
+      role: train
+      seed: 20260717
+      center_rad: [0.2, -0.30, 0.2, 1.55, 0.2, 0.1, 0.2]
+
+    - name: train_high
+      role: train
+      seed: 20260716
+      center_rad:  [-0.2, 0.10, -0.2, 1.65, -0.2, -0.1, -0.2]
+
+    - name: validation
+      role: validation
+      seed: 20260722
+      center_rad: [0.00, -0.15, 0.00, 1.55, 0.00, 0.05, 0.00]
+      repetitions: 2
+      trajectory_path: data/excitation_validation.npz
+      dataset_path: data/dynamics_validation.npz
 
 safety:
-  # The collector refuses to move until every pose has been checked on the
-  # real workcell and this is changed to true.
+  # Set true only after reviewing the generated trajectory in the real workcell.
   approved: true
-  joint_limit_margin_rad: 0.05
   max_abs_torque_nm: [20.0, 20.0, 12.0, 12.0, 6.0, 6.0, 6.0]
+  max_timestamp_gap_s: 0.10
 
-# Conservative example poses near the configured follower rest_q. These are
-# not collision-checked: review every target before setting safety.approved.
-poses:
-  - {name: rest,       q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033,  0.02744, 1.50378]}
-  - {name: joint2_lo,  q: [0.00000, -0.29689, -0.01138, 1.80020, -0.02033,  0.02744, 1.50378]}
-  - {name: joint2_hi,  q: [0.00000,  0.00311, -0.01138, 1.80020, -0.02033,  0.02744, 1.50378]}
-  - {name: joint3_lo,  q: [0.00000, -0.14689, -0.16138, 1.80020, -0.02033,  0.02744, 1.50378]}
-  - {name: joint3_hi,  q: [0.00000, -0.14689,  0.13862, 1.80020, -0.02033,  0.02744, 1.50378]}
-  - {name: joint4_lo,  q: [0.00000, -0.14689, -0.01138, 1.65020, -0.02033,  0.02744, 1.50378]}
-  - {name: joint4_hi,  q: [0.00000, -0.14689, -0.01138, 1.95020, -0.02033,  0.02744, 1.50378]}
-  - {name: joint5_lo,  q: [0.00000, -0.14689, -0.01138, 1.80020, -0.17033,  0.02744, 1.50378]}
-  - {name: joint5_hi,  q: [0.00000, -0.14689, -0.01138, 1.80020,  0.12967,  0.02744, 1.50378]}
-  - {name: joint6_lo,  q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033, -0.09256, 1.50378]}
-  - {name: joint6_hi,  q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033,  0.14744, 1.50378]}
-  - {name: joint7_mid, q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033,  0.02744, 1.20378]}
-  - {name: combined_a, q: [0.00000, -0.26689,  0.10862, 1.68020,  0.09967, -0.07256, 1.30378]}
-  - {name: combined_b, q: [0.00000, -0.02689, -0.13138, 1.92020, -0.14033,  0.12744, 1.10378]}
-  - {name: joint7_low, q: [0.00000, -0.14689, -0.01138, 1.80020, -0.02033,  0.02744, 0.90378]}
-  - {name: combined_c, q: [0.00000, -0.24689, -0.11138, 1.70020, -0.12033,  0.10744, 1.00378]}
-  - {name: combined_d, q: [0.00000, -0.04689,  0.08862, 1.90020,  0.07967, -0.05256, 0.95378]}
-  - {name: combined_e, q: [0.00000, -0.32689,  0.05862, 1.76020, -0.08033,  0.14744, 1.15378]}
-  - {name: combined_f, q: [0.00000,  0.03311, -0.08138, 1.84020,  0.11967, -0.09256, 1.25378]}
-  - {name: combined_g, q: [0.00000, -0.20689,  0.12862, 1.62020,  0.03967,  0.06744, 1.05378]}
-  - {name: combined_h, q: [0.00000, -0.08689, -0.14138, 1.98020, -0.10033, -0.11256, 0.85378]}
-  - {name: combined_i, q: [0.00000, -0.28689,  0.03862, 1.86020,  0.13967,  0.11744, 0.90378]}
-  - {name: combined_j, q: [0.00000, -0.00689,  0.11862, 1.70020, -0.16033,  0.07744, 1.35378]}
-  - {name: combined_k, q: [0.00000, -0.18689, -0.12138, 1.94020,  0.10967, -0.06256, 1.00378]}
-  - {name: combined_l, q: [0.00000, -0.10689,  0.07862, 1.66020, -0.13033,  0.13744, 1.20378]}
-  - {name: combined_m, q: [0.00000, -0.31689, -0.07138, 1.88020,  0.05967, -0.10256, 0.95378]}
-  - {name: combined_n, q: [0.00000,  0.02311,  0.04862, 1.74020, -0.09033,  0.09744, 1.10378]}
-  - {name: combined_o, q: [0.00000, -0.23689,  0.09862, 1.92020, -0.15033,  0.04744, 1.30378]}
-  - {name: combined_p, q: [0.00000, -0.05689, -0.10138, 1.64020,  0.12967, -0.08256, 0.90378]}
-  - {name: combined_q, q: [0.00000, -0.15689,  0.13862, 1.84020, -0.11033,  0.12744, 1.15378]}
+preprocess:
+  # Both dq and ddq are derived from measured q; V112 motor velocity is never used.
+  state_method: spline
+  spline_smoothing_rad2: 1.0e-5
+  fourier_harmonics: 8
+  torque_lowpass_hz: 12.0
+  torque_median_window: 3
+  outlier_z: 6.0
+  endpoint_trim_s: 0.25
+  validation_fraction: 0.25
+  split_seed: 20260719
+  min_samples: 500
+  coulomb_velocity_scale_rad_s: 0.02
 
-fit:
-  min_poses: 20
-  max_condition_number: 1000.0
-  mass_bounds_kg: [0.05, 2.0]
-  max_abs_com_m: 0.30
+identification:
+  svd_relative_tolerance: 1.0e-8
+  huber_delta: 1.5
+  max_irls_iterations: 30
+  ridge: 1.0e-8
+  physical_prior_weight: 1.0e-3
+  mass_bounds_kg: [0.0001, 10.0]
+  max_abs_com_m: 0.50
+  max_coulomb_nm: [8.0, 8.0, 6.0, 6.0, 4.0, 4.0, 4.0]
+  max_viscous_nm_per_rad_s: [8.0, 8.0, 6.0, 6.0, 4.0, 4.0, 4.0]
   max_abs_bias_nm: [8.0, 8.0, 6.0, 6.0, 4.0, 4.0, 4.0]
-  holdout_fraction: 0.30
-  split_seed: 20260718
-  min_holdout_improvement_ratio: 0.30
-  max_round_mass_relative_range: 0.05
-  max_round_com_spread_m: 0.01
-  max_round_bias_range_nm: [0.4, 0.4, 0.3, 0.3, 0.2, 0.2, 0.2]
+  max_physical_evaluations: 15000
+  physical_tolerance: 1.0e-7
+  physical_optimizer_backend: jax
+
+simulation:
+  scene_template_path: mujoco/scene_template.xml
+  end_effector_body: gripper_base
+  floor_z_m: -0.02
+  # Visual review boundary in the URDF world frame; replace with the real cleared workcell.
+  workspace_min_m: [-0.8, -0.8, 0.0]
+  workspace_max_m: [0.8, 0.8, 1.2]
+  display_rate_hz: 30.0
+  playback_speed: 1.0
+  collision_sample_stride: 10
+  # Persistent MuJoCo convex-hull overlap: 301/301 samples, -0.028506 m on all profiles.
+  ignored_contact_pairs:
+    - [link5_collision_0, gripper_flange_collision_0]

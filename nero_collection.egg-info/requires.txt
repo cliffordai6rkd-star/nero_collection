@@ -1,3 +1,17 @@
 h5py>=3.11
+matplotlib>=3.7
+mujoco<4,>=3.3
 numpy<3,>=1.23
+opencv-python-headless>=4.8
+pin<4,>=3
 PyYAML>=6.0
+scipy<2,>=1.10
+
+[:platform_system == "Linux"]
+cmeel-tinyxml2<11,>=10
+cmeel-urdfdom<5,>=4
+
+[gpu-identification]
+
+[gpu-identification:platform_system == "Linux"]
+jax[cuda13]<1,>=0.6
