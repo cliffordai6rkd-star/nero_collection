@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+from pathlib import Path
 import threading
 import time
 from dataclasses import dataclass, field
@@ -109,8 +110,10 @@ class V4L2Camera(CameraSource):
 
     def __post_init__(self) -> None:
         self.name = self.config.name
-        if self.config.device is None:
-            raise CameraUnavailable(f"V4L2 camera {self.name} must define device")
+        if self.config.device is None and self.config.serial_number is None:
+            raise CameraUnavailable(
+                f"V4L2 camera {self.name} must define device or serial_number"
+            )
         if self.config.depth:
             raise CameraUnavailable(f"V4L2 camera {self.name} does not support depth=true")
 
@@ -118,7 +121,11 @@ class V4L2Camera(CameraSource):
         if self._capture is not None:
             return
         cv2 = _import_cv2()
-        device = self.config.device
+        device = (
+            self.config.device
+            if self.config.device is not None
+            else _resolve_v4l2_device_by_serial(str(self.config.serial_number))
+        )
         open_deadline = time.monotonic() + self.config.startup_timeout_s
         capture = None
         attempt = 0
@@ -264,6 +271,32 @@ class V4L2Camera(CameraSource):
         with self._frame_lock:
             self._latest_frame = frame
             self._latest_timestamp_us = int(timestamp_us)
+
+
+def _resolve_v4l2_device_by_serial(
+    serial_number: str,
+    by_id_directory: str | Path = "/dev/v4l/by-id",
+) -> str:
+    serial_number = str(serial_number).strip()
+    if not serial_number:
+        raise CameraUnavailable("V4L2 camera serial_number must be non-empty")
+    directory = Path(by_id_directory)
+    if not directory.is_dir():
+        raise CameraUnavailable(f"V4L2 stable-device directory does not exist: {directory}")
+    matches = sorted(
+        path
+        for path in directory.iterdir()
+        if serial_number in path.name and path.name.endswith("-video-index0") and path.exists()
+    )
+    if not matches:
+        raise CameraUnavailable(
+            f"No V4L2 capture device found for serial_number={serial_number!r} in {directory}"
+        )
+    if len(matches) > 1:
+        raise CameraUnavailable(
+            f"Multiple V4L2 capture devices match serial_number={serial_number!r}: {matches}"
+        )
+    return str(matches[0])
 
 
 class CameraManager:

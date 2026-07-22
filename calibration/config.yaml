@@ -2,7 +2,7 @@ collection_config: ../configs/master_slave_can.yaml
 pair: main
 
 model:
-  urdf_path: ../urdf/nero/nero_with_gripper_identified.urdf
+  urdf_path: ../urdf/nero/nero_with_gripper.urdf
   # urdf_path: ../urdf/nero/nero_with_grippe.urdf
   locked_joint_names: [gripper, gripper_joint1, gripper_joint2]
   # This order is checked against the reduced Pinocchio model before any motion.

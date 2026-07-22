@@ -5,7 +5,14 @@ from importlib.util import find_spec
 import numpy as np
 import pytest
 
-from nero_collection.cameras import CameraManager, V4L2Camera, _build_camera, _prepare_v4l2_frame
+from nero_collection.cameras import (
+    CameraManager,
+    CameraUnavailable,
+    V4L2Camera,
+    _build_camera,
+    _prepare_v4l2_frame,
+    _resolve_v4l2_device_by_serial,
+)
 from nero_collection.config import CameraConfig, _parse_camera
 
 
@@ -35,10 +42,26 @@ def test_parse_v4l2_camera_config() -> None:
     assert isinstance(_build_camera(config), V4L2Camera)
 
 
+def test_parse_v4l2_camera_config_by_serial_number() -> None:
+    config = _parse_camera(
+        {"name": "wrist", "backend": "v4l2", "serial_number": "CC1WC520122"}
+    )
+
+    assert config.device is None
+    assert config.serial_number == "CC1WC520122"
+    assert isinstance(_build_camera(config), V4L2Camera)
+
+
 @pytest.mark.parametrize(
     "data",
     [
         {"name": "camera", "backend": "v4l2"},
+        {
+            "name": "camera",
+            "backend": "v4l2",
+            "device": "/dev/video2",
+            "serial_number": "CC1WC520122",
+        },
         {"name": "camera", "backend": "v4l2", "device": "/dev/video2", "fps": 0},
         {"name": "camera", "backend": "v4l2", "device": "/dev/video2", "pixel_format": "MJPEG"},
         {"name": "camera", "backend": "v4l2", "device": "/dev/video2", "crop": [5, 4, 0, None]},
@@ -93,6 +116,22 @@ def test_v4l2_poll_returns_each_latest_frame_once() -> None:
     assert frame is not None
     assert frame.timestamp_us == 200
     assert np.array_equal(frame.frame, second)
+
+
+def test_resolve_v4l2_device_by_serial_uses_capture_index(tmp_path) -> None:
+    capture = tmp_path / "usb-Orbbec_Dabai_CC1WC520122-video-index0"
+    metadata = tmp_path / "usb-Orbbec_Dabai_CC1WC520122-video-index1"
+    capture.touch()
+    metadata.touch()
+
+    result = _resolve_v4l2_device_by_serial("CC1WC520122", tmp_path)
+
+    assert result == str(capture)
+
+
+def test_resolve_v4l2_device_by_serial_rejects_unknown_serial(tmp_path) -> None:
+    with pytest.raises(CameraUnavailable, match="No V4L2 capture device"):
+        _resolve_v4l2_device_by_serial("missing", tmp_path)
 
 
 def test_camera_manager_stops_started_sources_after_start_failure() -> None:

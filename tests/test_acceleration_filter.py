@@ -171,7 +171,6 @@ def test_episode_save_reconstructs_dynamics_from_q_and_preserves_raw_fields(
         assert teleop["dq_follower"].attrs["timestamp_path"] == "teleop/timestamp_us"
         assert bool(teleop["tau_follower"].attrs["zero_phase"]) is True
 
-
 def test_resampling_falls_back_when_sdk_motor_timestamp_is_stale() -> None:
     timeline = np.arange(20, dtype=np.int64) * 10_000 + 1_000_000
     stale_motor_timestamp = np.full((20, 2), 900_000, dtype=np.int64)

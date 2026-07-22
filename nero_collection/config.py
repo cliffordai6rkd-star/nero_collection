@@ -395,8 +395,17 @@ def _parse_camera(data: dict[str, Any]) -> CameraConfig:
         raise ValueError("camera.device must be a device path or integer index")
     backend = str(data.get("backend", "orbbec_dabai"))
     normalized_backend = backend.lower().replace("-", "_")
-    if normalized_backend in {"v4l2", "opencv_v4l2", "opencv"} and device is None:
-        raise ValueError("V4L2 camera configuration must define device")
+    serial_number_value = data.get("serial_number")
+    serial_number = (
+        str(serial_number_value).strip() if serial_number_value is not None else None
+    )
+    if serial_number == "":
+        raise ValueError("camera.serial_number must be non-empty")
+    if normalized_backend in {"v4l2", "opencv_v4l2", "opencv"}:
+        if device is None and serial_number is None:
+            raise ValueError("V4L2 camera configuration must define device or serial_number")
+        if device is not None and serial_number is not None:
+            raise ValueError("V4L2 camera configuration must not define both device and serial_number")
     pixel_format = str(data.get("pixel_format", "MJPG")).upper()
     if len(pixel_format) != 4 or not pixel_format.isascii():
         raise ValueError("camera.pixel_format must be a four-character V4L2 code")
@@ -427,7 +436,7 @@ def _parse_camera(data: dict[str, Any]) -> CameraConfig:
         pixel_format=pixel_format,
         buffer_size=buffer_size,
         startup_timeout_s=startup_timeout_s,
-        serial_number=data.get("serial_number"),
+        serial_number=serial_number,
         width=width,
         height=height,
         fps=fps,

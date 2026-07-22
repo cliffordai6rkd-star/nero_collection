@@ -176,6 +176,60 @@ python scripts/check_master_modes.py \
   --include-follower-mode
 ```
 
+### Leader 模式阻抗探测
+
+`scripts/probe_leader_impedance.py` 用于检查 V112 在收到 MIT 命令后是否仍保持
+`leader_mode`。脚本默认保留机械臂当前使能状态；仅在机械臂尚未使能时才显式添加
+`--enable`，该选项在首次使能失败时可能按 adapter 的既有逻辑执行 reset 和清错。
+先运行不带授权参数的只读检查：
+
+```bash
+python scripts/probe_leader_impedance.py \
+  --config configs/master_slave_can.yaml \
+  --pair main
+```
+
+确认机械臂远离关节限位、急停可触达后，发送一次零增益 MIT 命令：
+
+```bash
+python scripts/probe_leader_impedance.py \
+  --config configs/master_slave_can.yaml \
+  --pair main \
+  --zero-probe
+```
+
+只有输出 `ZERO-PROBE PASS` 且 `after zero MIT: role=leader` 时，才继续在第七轴进行
+短时小阻尼测试：
+
+```bash
+python scripts/probe_leader_impedance.py \
+  --config configs/master_slave_can.yaml \
+  --pair main \
+  --zero-probe \
+  --joint 7 \
+  --damping-kd 0.05 \
+  --duration-s 5
+```
+
+测试期间缓慢拖动指定关节，对比零阻尼时的手感，并观察打印的模式、电流和力矩。
+也可以在第七轴持续发送严格限幅的前馈力矩，以更直接地检查 leader 模式是否执行
+`t_ff`：
+
+```bash
+python scripts/probe_leader_impedance.py \
+  --config configs/master_slave_can.yaml \
+  --pair main \
+  --zero-probe \
+  --joint 7 \
+  --torque-ff 0.1 \
+  --duration-s 2
+```
+
+`--torque-ff` 单位为 N·m，可用负值检查反方向，绝对值被限制在 `3.0 N·m`；它与
+`--damping-kd` 互斥。测试开始前应轻扶机械臂，不要靠近 joint7 限位。
+脚本在正常结束、异常和 `Ctrl-C` 时都会尝试发送零增益 MIT 命令。如果零增益命令使
+模式变成 follower 或模式无法确认，脚本会停止，不会执行非零阻尼测试。
+
 也可以只切换模式并持续观察单臂关节角：
 
 ```bash

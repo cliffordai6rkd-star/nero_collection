@@ -12,10 +12,10 @@ teleop:
     control_mode: position  # mit: 固件侧关节阻抗；position: 原 move_js 位置控制
     mit:
       # 顺序均为 joint1 ... joint7。先用低刚度测试，再逐步调参。
-      kp: [1.0, 1.0, 1.0, 5.0, 1.0, 5.0, 7.0]
-      kd: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 1.3]
+      kp: [2, 2, 2, 25, 2, 2, 7]
+      kd: [0.1, 0.1, 0.1, 0.8, 0.1, 0.1, 0.8]
       v_des: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      t_ff: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # N.m
+      t_ff: [0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0]  # N.m
     pre_teleop_align_enabled: true
     pre_teleop_align_error_limit_rad: 0.03
     joint_step_limit_rad: 0.3
@@ -66,17 +66,17 @@ dynamics_processing:
 # 开启后用 0.5 秒固定延迟重建 dq/ddq，并显示七轴 tau_ext=tau_model-tau_follower。
 realtime_plot:
   enabled: true
-  window_s: 10.0
+  window_s: 20.0
   update_rate_hz: 20.0
   inverse_dynamics:
-    # urdf_path: ../urdf/nero/nero_with_gripper.urdf
-    urdf_path: ../urdf/nero/nero_with_gripper_identified.urdf
-    manifest_path: ../calibration/results/dynamics_manifest.yaml
-    delay_s: 0.5
+    urdf_path: ../urdf/nero/nero_with_gripper.urdf
+    # urdf_path: ../urdf/nero/nero_with_gripper_identified.urdf
+    # manifest_path: ../calibration/results/h5_fixed_inertia_manifest.yaml
+    delay_s: 0.2
     locked_joint_names: [gripper, gripper_joint1, gripper_joint2]
     gravity_m_s2: [0.0, 0.0, -9.81]
 
-# cameras:
+cameras:
   # - name: side
   #   enabled: true
   #   backend: v4l2
@@ -92,20 +92,20 @@ realtime_plot:
   #   crop: [0, null, 0, null]
   #   output_size: [256, 192]
 
-  # - name: wrist
-  #   enabled: true
-  #   backend: v4l2
-  #   device: /dev/video4
-  #   pixel_format: MJPG
-  #   buffer_size: 1
-  #   startup_timeout_s: 5.0
-  #   width: 640
-  #   height: 480
-  #   fps: 30.0
-  #   exposure: null
-  #   depth: false
-  #   # crop: [0, null, 0, null]
-  #   output_size: [256, 192]
+  - name: wrist
+    enabled: true
+    backend: v4l2
+    serial_number: CC1WC520122
+    pixel_format: MJPG
+    buffer_size: 1
+    startup_timeout_s: 5.0
+    width: 640
+    height: 480
+    fps: 25.0
+    exposure: null
+    depth: false
+    # crop: [0, null, 0, null]
+    output_size: [256, 192]
 
 gripper:
   enabled: true
